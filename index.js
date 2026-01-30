@@ -26,7 +26,6 @@ client.once('ready', async () => {
     console.log(`Bot bejelentkezve: ${client.user.tag}`);
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
     try {
-        console.log('Slash parancsok frissítése...');
         await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
         console.log('Slash parancsok sikeresen regisztrálva!');
     } catch (error) {
@@ -41,21 +40,22 @@ client.on('interactionCreate', async interaction => {
     if (interaction.commandName === 'manifest') {
         const appId = interaction.options.getString('appid').trim();
 
-        // Validáció: csak számokat fogadunk el
+        // Validáció: csak számokat fogadunk el (forrás: CLI script logic)
         if (!/^\d+$/.test(appId)) {
-            return interaction.reply({ content: '❌ [ERROR] Kérlek, csak számokat adj meg AppID-ként!', ephemeral: true });
+            return interaction.reply({ content: '❌ [ERROR] Kérlek, csak számokat adj meg!', ephemeral: true });
         }
 
         await interaction.deferReply();
 
         try {
+            // API végpontok az eredeti forrás alapján
             const checkUrl = `https://api.github.com/repos/SteamAutoCracks/ManifestHub/branches/${appId}`;
             const downloadUrl = `https://codeload.github.com/SteamAutoCracks/ManifestHub/zip/refs/heads/${appId}`;
 
-            // 1. Ellenőrzés a forrásfájlokban lévő API alapján
+            // Ellenőrzés
             await axios.get(checkUrl);
 
-            // 2. ZIP fájl letöltése a forrásfájlban megadott URL-ről
+            // ZIP letöltése
             const response = await axios({
                 method: 'get',
                 url: downloadUrl,
@@ -65,21 +65,23 @@ client.on('interactionCreate', async interaction => {
             const attachment = new AttachmentBuilder(Buffer.from(response.data), { name: `manifest_${appId}.zip` });
 
             const embed = new EmbedBuilder()
-                .setColor(0x3b82f6) // A weboldal kék színe
+                .setColor(0x3b82f6)
                 .setTitle('STEAM MANIFEST HUB')
-                .setDescription(`A(z) **${appId}** azonosítóhoz tartozó manifest fájlt letöltöttem.`)
+                .setDescription(`A(z) **${appId}** manifest fájlja letöltve.`)
                 .addFields(
-                    { name: 'DISCLAIMER', value: 'Ez a szoftver csak tájékoztató jellegű. Nem vállalunk felelősséget a használatból eredő következményekért.' }, //
-                    { name: 'Forrás', value: 'ManifestHub Database' }
+                    { 
+                        name: 'DISCLAIMER', 
+                        value: 'Ez a szoftver csak tájékoztató jellegű. Nem vállalunk felelősséget a használatból eredő következményekért.' //
+                    },
+                    { name: 'Forrás', value: 'Manifest Database' } // Módosítva a kérésed szerint
                 )
-                .setFooter({ text: 'Made By SSMG4 | © 2026' }); //
+                .setFooter({ text: 'by Szaby | © 2026' }); // Módosítva a kérésed szerint
 
             await interaction.editReply({ embeds: [embed], files: [attachment] });
 
         } catch (error) {
-            // Ha nem található a manifest
             await interaction.editReply({ 
-                content: `> MANIFEST NOT FOUND\nNem található manifest a(z) **${appId}** AppID-hoz az adatbázisban.` 
+                content: `> MANIFEST NOT FOUND\nNem található manifest a(z) **${appId}** AppID-hoz.` 
             });
         }
     }
