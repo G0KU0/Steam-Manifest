@@ -28,14 +28,14 @@ const client = new Client({
     ] 
 });
 
-// --- SLASH PARANCSOK REGISZTRÁLÁSA (JAVÍTOTT LEÍRÁSOKKAL) ---
+// --- SLASH PARANCSOK REGISZTRÁLÁSA ---
 const commands = [
     new SlashCommandBuilder()
         .setName('manifest')
         .setDescription('Steam manifest letöltése')
         .addSubcommand(sub => 
             sub.setName('id')
-                .setDescription('Letöltés AppID alapján')
+                .setDescription('Letöltés pontos AppID alapján')
                 .addStringOption(opt => opt.setName('appid').setDescription('A játék pontos ID-ja').setRequired(true)))
         .addSubcommand(sub => 
             sub.setName('nev')
@@ -49,14 +49,14 @@ const commands = [
         .addSubcommandGroup(group =>
             group.setName('user')
                 .setDescription('Felhasználók kezelése')
-                .addSubcommand(sub => sub.setName('add').setDescription('Felhasználó hozzáadása a listához').addUserOption(o => o.setName('target').setDescription('A kiválasztott felhasználó').setRequired(true)))
-                .addSubcommand(sub => sub.setName('remove').setDescription('Felhasználó eltávolítása a listából').addUserOption(o => o.setName('target').setDescription('A kiválasztott felhasználó').setRequired(true)))
-                .addSubcommand(sub => sub.setName('list').setDescription('Engedélyezett felhasználók listázása')))
+                .addSubcommand(sub => sub.setName('add').setDescription('Felhasználó hozzáadása').addUserOption(o => o.setName('target').setDescription('Felhasználó kiválasztása').setRequired(true)))
+                .addSubcommand(sub => sub.setName('remove').setDescription('Felhasználó eltávolítása').addUserOption(o => o.setName('target').setDescription('Felhasználó kiválasztása').setRequired(true)))
+                .addSubcommand(sub => sub.setName('list').setDescription('Engedélyezett felhasználók listája')))
         .addSubcommandGroup(group =>
             group.setName('channel')
                 .setDescription('Csatornák kezelése')
-                .addSubcommand(sub => sub.setName('add').setDescription('Csatorna engedélyezése a bot számára').addChannelOption(o => o.setName('channel').setDescription('A kiválasztott csatorna').setRequired(true)))
-                .addSubcommand(sub => sub.setName('remove').setDescription('Csatorna eltávolítása az engedélyezettek közül').addChannelOption(o => o.setName('channel').setDescription('A kiválasztott csatorna').setRequired(true))))
+                .addSubcommand(sub => sub.setName('add').setDescription('Csatorna engedélyezése').addChannelOption(o => o.setName('channel').setDescription('Csatorna kiválasztása').setRequired(true)))
+                .addSubcommand(sub => sub.setName('remove').setDescription('Csatorna tiltása').addChannelOption(o => o.setName('channel').setDescription('Csatorna kiválasztása').setRequired(true))))
 ].map(c => c.toJSON());
 
 client.once('ready', async () => {
@@ -64,9 +64,7 @@ client.once('ready', async () => {
     try {
         await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
         console.log(`Bot kész: ${client.user.tag}`);
-    } catch (error) {
-        console.error('Hiba a parancsok regisztrálásakor:', error);
-    }
+    } catch (e) { console.error(e); }
 });
 
 // --- LOGOLÁS ---
@@ -78,33 +76,59 @@ async function sendLog(title, description, color = 0x3b82f6) {
     }
 }
 
-// --- ÜZENET SZŰRŐ ---
+// --- ÜZENET SZŰRŐ ÉS SEGÍTSÉG ---
 client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
 
     let db = await Settings.findOne();
     if (!db || !db.allowedChannels.includes(message.channel.id)) return;
 
+    // Ha nem az admin ír szöveges üzenetet
     if (message.author.id !== process.env.ADMIN_ID) {
         try {
             await message.delete();
-            const reply = await message.channel.send(`❌ <@${message.author.id}>, ebben a szobában csak parancsokat tudsz használni!`);
-            setTimeout(() => reply.delete().catch(() => {}), 5000);
-        } catch (e) {
-            console.error("Hiba az üzenet törlésekor:", e);
-        }
+            
+            let response = `❌ <@${message.author.id}>, ebben a szobában csak parancsokat használhatsz!\n\n`;
+            
+            if (db.allowedUsers.includes(message.author.id)) {
+                response += `**Mivel van engedélyed, ezeket a parancsokat használhatod:**\n> \`/manifest id\` - Letöltés AppID-val\n> \`/manifest nev\` - Keresés név alapján`;
+            } else {
+                response += `⚠️ Neked jelenleg **nincs engedélyed** a parancsok használatához. Kérj hozzáférést egy admintól!`;
+            }
+
+            const reply = await message.channel.send(response);
+            setTimeout(() => reply.delete().catch(() => {}), 10000); // 10 mp után törli
+        } catch (e) { console.error(e); }
     }
 });
 
-// --- AUTOCOMPLETE ---
+// --- JAVÍTOTT AUTOCOMPLETE (NÉV SZERINTI KERESÉS) ---
 client.on('interactionCreate', async interaction => {
     if (!interaction.isAutocomplete()) return;
-    const focusedValue = interaction.options.getFocused();
-    if (focusedValue.length === 0) return interaction.respond([]);
-    try {
-        const search = await axios.get(`https://store.steampowered.com/api/storesearch/?term=${encodeURIComponent(focusedValue)}&l=hungarian`);
-        await interaction.respond(search.data.items.slice(0, 10).map(g => ({ name: `${g.name.substring(0, 80)} (ID: ${g.id})`, value: g.id.toString() })));
-    } catch (e) { await interaction.respond([]); }
+
+    if (interaction.commandName === 'manifest') {
+        const focusedValue = interaction.options.getFocused();
+        if (!focusedValue) return interaction.respond([]);
+
+        try {
+            // Steam kereső API (cc=HU a magyar találatokért)
+            const search = await axios.get(`https://store.steampowered.com/api/storesearch/?term=${encodeURIComponent(focusedValue)}&l=hungarian&cc=HU`, { timeout: 2500 });
+            
+            if (!search.data || !search.data.items) return interaction.respond([]);
+
+            const suggestions = search.data.items
+                .map(g => ({ 
+                    name: `${g.name.substring(0, 85)} (ID: ${g.id})`, 
+                    value: g.id.toString() 
+                }))
+                .slice(0, 20);
+
+            await interaction.respond(suggestions);
+        } catch (e) {
+            // Ha hiba van vagy lassú az API, üres választ küldünk a crash elkerülésére
+            await interaction.respond([]).catch(() => {});
+        }
+    }
 });
 
 // --- PARANCSKEZELŐ ---
@@ -126,7 +150,7 @@ client.on('interactionCreate', async interaction => {
             } else if (sub === 'remove') {
                 db.allowedUsers = db.allowedUsers.filter(id => id !== target.id);
             } else if (sub === 'list') {
-                return interaction.reply({ content: `**Engedélyezett felhasználók:**\n${db.allowedUsers.map(id => `<@${id}>`).join('\n') || 'Nincsenek engedélyezett felhasználók.'}`, ephemeral: true });
+                return interaction.reply({ content: `**Engedélyezett felhasználók:**\n${db.allowedUsers.map(id => `<@${id}>`).join('\n') || 'Nincs senki.'}`, ephemeral: true });
             }
         }
 
