@@ -19,13 +19,16 @@ const Settings = mongoose.model('Settings', new mongoose.Schema({
     allowedChannels: [String]
 }));
 
-// --- MANIFEST FORRÁSOK ---
+// --- FORRÁSOK AZ LTSTEAMPLUGIN ALAPJÁN ---
 const MANIFEST_SOURCES = [
-    { name: 'ManifestHub (Primary)', url: (id) => `https://codeload.github.com/SteamAutoCracks/ManifestHub/zip/refs/heads/${id}` },
-    { name: 'ManifestHub (Mirror)', url: (id) => `https://codeload.github.com/Steam-Manifests/ManifestHub/zip/refs/heads/${id}` },
-    { name: 'Pointy-Hat Store', url: (id) => `https://codeload.github.com/Pointy-Hat/ManifestHub/zip/refs/heads/${id}` },
-    { name: 'Steam-Archive', url: (id) => `https://codeload.github.com/Steam-Manifests-Archive/ManifestHub/zip/refs/heads/${id}` }
+    { name: 'LuaTools Bypasses', url: (id) => `https://files.luatools.work/GameBypasses/${id}.zip` },
+    { name: 'Ryuu Server', url: (id) => `http://167.235.229.108/${id}` },
+    { name: 'Sushi Repo', url: (id) => `https://raw.githubusercontent.com/sushi-dev55-alt/sushitools-games-repo-alt/refs/heads/main/${id}.zip` },
+    { name: 'TwentyTwo Cloud', url: (id) => `http://masss.pythonanywhere.com/storage?auth=IEOIJE54esfsipoE56GE4&appid=${id}` },
+    { name: 'ManifestHub', url: (id) => `https://codeload.github.com/SteamAutoCracks/ManifestHub/zip/refs/heads/${id}` }
 ];
+
+const ONLINE_FIX_SOURCE = "https://files.luatools.work/OnlineFix1/";
 
 const client = new Client({ 
     intents: [
@@ -35,88 +38,10 @@ const client = new Client({
     ] 
 });
 
-// --- MANILUA LOGIKA (A BEKÜLDÖTT GO KÓD ALAPJÁN) ---
-async function processFilesToLua(attachments, appId = "unknown") {
-    let manifestFiles = {};
-    let configData = {};
-
-    for (const attachment of attachments.values()) {
-        try {
-            const response = await axios.get(attachment.url, { responseType: 'text' });
-            const content = response.data;
-            const fileName = attachment.name;
-
-            if (fileName.endsWith('.manifest')) {
-                const parts = fileName.split('_');
-                if (parts.length >= 2) {
-                    const depotID = parts[0];
-                    const manifestNumber = parts[1].replace('.manifest', '');
-                    manifestFiles[depotID] = manifestNumber;
-                }
-            } else if (fileName === 'config.vdf') {
-                const depotRegex = /"(\d+)"\s*{\s*"DecryptionKey"\s*"([^"]+)"/g;
-                let match;
-                while ((match = depotRegex.exec(content)) !== null) {
-                    configData[match[1]] = match[2];
-                }
-            }
-        } catch (e) { console.error("Hiba a fájl feldolgozása közben:", e); }
-    }
-
-    let outputEntries = [];
-    for (const depotID in manifestFiles) {
-        if (configData[depotID]) {
-            outputEntries.push(`addappid(${depotID}, 1, "${configData[depotID]}")\nsetManifestid(${depotID}, "${manifestFiles[depotID]}", 0)`);
-        } else {
-            outputEntries.push(`setManifestid(${depotID}, "${manifestFiles[depotID]}", 0)`);
-        }
-    }
-
-    if (outputEntries.length === 0 && Object.keys(manifestFiles).length === 0) return null;
-
-    return `-- Generated via Manilua Logic\n-- AppID Context: ${appId}\naddappid(${appId})\n` + outputEntries.join('\n');
-}
-
-// --- SLASH PARANCSOK REGISZTRÁLÁSA ---
-const commands = [
-    new SlashCommandBuilder()
-        .setName('manifest')
-        .setDescription('SteamTools .lua generáló és Manifest kereső')
-        .addSubcommand(sub => 
-            sub.setName('id')
-                .setDescription('Generálás AppID alapján')
-                .addStringOption(o => o.setName('appid').setDescription('A játék AppID-ja').setRequired(true))
-                .addBooleanOption(o => o.setName('dlc').setDescription('Összes DLC feloldása? (Alapértelmezett: True)')))
-        .addSubcommand(sub => 
-            sub.setName('nev')
-                .setDescription('Keresés név alapján')
-                .addStringOption(o => o.setName('jateknev').setDescription('Kezdd el gépelni a játék nevét').setRequired(true).setAutocomplete(true))
-                .addBooleanOption(o => o.setName('dlc').setDescription('Összes DLC feloldása? (Alapértelmezett: True)'))),
-    
-    new SlashCommandBuilder()
-        .setName('fix')
-        .setDescription('Gyakori SteamTools hibák és megoldások'),
-
-    new SlashCommandBuilder()
-        .setName('manage')
-        .setDescription('Bot kezelése (Admin)')
-        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-        .addSubcommandGroup(group =>
-            group.setName('user')
-                .setDescription('Felhasználók kezelése')
-                .addSubcommand(sub => sub.setName('add').setDescription('Jogosultság adása').addUserOption(o => o.setName('target').setDescription('Felhasználó').setRequired(true)))
-                .addSubcommand(sub => sub.setName('remove').setDescription('Jogosultság elvétele').addUserOption(o => o.setName('target').setDescription('Felhasználó').setRequired(true)))
-                .addSubcommand(sub => sub.setName('list').setDescription('Engedélyezett felhasználók listája')))
-        .addSubcommandGroup(group =>
-            group.setName('channel')
-                .setDescription('Csatornák kezelése')
-                .addSubcommand(sub => sub.setName('add').setDescription('Csatorna engedélyezése').addChannelOption(o => o.setName('channel').setDescription('Csatorna').setRequired(true)))
-                .addSubcommand(sub => sub.setName('remove').setDescription('Csatorna tiltása').addChannelOption(o => o.setName('channel').setDescription('Csatorna').setRequired(true))))
-].map(c => c.toJSON());
-
 // --- SEGÉDFÜGGVÉNYEK ---
 
-async function fetchManifestZip(id) {
+// Keresés az összes forrásban sorrendben
+async function fetchFromSources(id) {
     for (const source of MANIFEST_SOURCES) {
         try {
             const res = await axios({ method: 'get', url: source.url(id), responseType: 'arraybuffer', timeout: 5000 });
@@ -126,37 +51,61 @@ async function fetchManifestZip(id) {
     return null;
 }
 
+// Manilua logika (fájlból kinyerés)
+async function processToLua(attachments, appId = "unknown") {
+    let manifestFiles = {};
+    let configData = {};
+    for (const a of attachments.values()) {
+        const res = await axios.get(a.url, { responseType: 'text' }).catch(() => null);
+        if (!res) continue;
+        if (a.name.endsWith('.manifest')) {
+            const parts = a.name.split('_');
+            if (parts.length >= 2) manifestFiles[parts[0]] = parts[1].replace('.manifest', '');
+        } else if (a.name === 'config.vdf') {
+            const match = res.data.matchAll(/"(\d+)"\s*{\s*"DecryptionKey"\s*"([^"]+)"/g);
+            for (const m of match) configData[m[1]] = m[2];
+        }
+    }
+    let lua = `-- Generated by Master Bot (Manilua)\naddappid(${appId})\n`;
+    for (const id in manifestFiles) {
+        if (configData[id]) lua += `addappid(${id}, 1, "${configData[id]}")\n`;
+        lua += `setManifestid(${id}, "${manifestFiles[id]}", 0)\n`;
+    }
+    return lua;
+}
+
+// --- SLASH PARANCSOK REGISZTRÁLÁSA ---
+const commands = [
+    new SlashCommandBuilder()
+        .setName('manifest')
+        .setDescription('Manifest és .lua feloldó letöltése (Összes DLC)')
+        .addStringOption(o => o.setName('query').setDescription('Játék név vagy ID').setRequired(true).setAutocomplete(true))
+        .addBooleanOption(o => o.setName('dlc').setDescription('Összes DLC feloldása a .lua fájlban?')),
+    
+    new SlashCommandBuilder()
+        .setName('onlinefix')
+        .setDescription('Online-Fix (.zip) letöltése a LuaTools szerveréről')
+        .addStringOption(o => o.setName('query').setDescription('Játék név vagy ID').setRequired(true).setAutocomplete(true)),
+
+    new SlashCommandBuilder().setName('fix').setDescription('Steam indítási hiba javítása (appinfo.vdf)'),
+
+    new SlashCommandBuilder()
+        .setName('manage')
+        .setDescription('Admin beállítások')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .addSubcommand(s => s.setName('user').setDescription('User hozzáadása').addUserOption(o => o.setName('target').setRequired(true)))
+        .addSubcommand(s => s.setName('channel').setDescription('Csatorna engedélyezése').addChannelOption(o => o.setName('target').setRequired(true)))
+].map(c => c.toJSON());
+
 // --- ESEMÉNYEK ---
 
 client.once('ready', async () => {
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
-    try {
-        await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
-        console.log(`✅ ${client.user.tag} online és parancsok frissítve!`);
-    } catch (e) { console.error(e); }
+    await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
+    console.log(`✅ ${client.user.tag} online - LuaTools források beépítve!`);
 });
 
-// Automatikus Manilua feldolgozás fájlfeltöltéskor
-client.on('messageCreate', async message => {
-    if (message.author.bot || message.attachments.size === 0) return;
-
-    let db = await Settings.findOne();
-    if (!db || !db.allowedChannels.includes(message.channel.id)) return;
-
-    const hasRelevantFiles = message.attachments.some(a => a.name.endsWith('.manifest') || a.name === 'config.vdf');
-    if (hasRelevantFiles) {
-        const lua = await processFilesToLua(message.attachments);
-        if (lua) {
-            const file = new AttachmentBuilder(Buffer.from(lua), { name: 'manilua_unlock.lua' });
-            message.reply({ 
-                content: "✅ Észleltem a manifest/config fájlokat. Generáltam neked egy profi `.lua` feloldót a PiracyBound logika alapján!", 
-                files: [file] 
-            });
-        }
-    }
-});
-
-// Autocomplete
+// Autocomplete Steam keresővel
 client.on('interactionCreate', async interaction => {
     if (!interaction.isAutocomplete()) return;
     const focused = interaction.options.getFocused();
@@ -166,83 +115,90 @@ client.on('interactionCreate', async interaction => {
     await interaction.respond(suggestions);
 });
 
-// Parancskezelő
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
-
     let db = await Settings.findOne() || await Settings.create({ allowedUsers: [process.env.ADMIN_ID], allowedChannels: [] });
 
-    // FIX PARANCS
-    if (interaction.commandName === 'fix') {
-        const fixEmbed = new EmbedBuilder()
-            .setTitle('🛠️ SteamTools Segítség')
-            .setColor(0xFFA500)
-            .addFields(
-                { name: '❌ Steam nem indul / Hibaüzenet', value: 'Zárd be a Steamet, töröld az `appinfo.vdf` fájlt a `Steam/appcache` mappából, majd indítsd újra!' },
-                { name: '📁 Hogyan kell betölteni?', value: 'A kapott `.lua` fájlt egyszerűen húzd rá a SteamTools lebegő ikonjára!' }
-            );
-        return interaction.reply({ embeds: [fixEmbed], ephemeral: true });
+    // --- ONLINE-FIX LETÖLTÉS ---
+    if (interaction.commandName === 'onlinefix') {
+        const appId = interaction.options.getString('query');
+        await interaction.deferReply({ ephemeral: true });
+        try {
+            const url = `${ONLINE_FIX_SOURCE}${appId}.zip`;
+            const res = await axios({ method: 'get', url: url, responseType: 'arraybuffer' }).catch(() => null);
+            if (res && res.status === 200) {
+                const file = new AttachmentBuilder(Buffer.from(res.data), { name: `OnlineFix_${appId}.zip` });
+                await interaction.editReply({ content: `✅ **Online-Fix** letöltve a LuaTools szerveréről!`, files: [file] });
+            } else {
+                await interaction.editReply("❌ Ehhez a játékhoz nincs Online-Fix a LuaTools adatbázisában.");
+            }
+        } catch (e) { await interaction.editReply("❌ Hiba."); }
     }
 
-    // ADMIN PARANCSOK
-    if (interaction.commandName === 'manage') {
-        if (interaction.user.id !== process.env.ADMIN_ID) return interaction.reply({ content: '❌ Csak az admin!', ephemeral: true });
-        const group = interaction.options.getSubcommandGroup();
-        const sub = interaction.options.getSubcommand();
-        const target = interaction.options.getUser('target') || interaction.options.getChannel('channel');
-
-        if (group === 'user') {
-            if (sub === 'add') { if (!db.allowedUsers.includes(target.id)) db.allowedUsers.push(target.id); }
-            else if (sub === 'remove') db.allowedUsers = db.allowedUsers.filter(id => id !== target.id);
-            else if (sub === 'list') return interaction.reply({ content: `Tagok: ${db.allowedUsers.map(id => `<@${id}>`).join(', ')}`, ephemeral: true });
-        } else if (group === 'channel') {
-            if (sub === 'add') { if (!db.allowedChannels.includes(target.id)) db.allowedChannels.push(target.id); }
-            else if (sub === 'remove') db.allowedChannels = db.allowedChannels.filter(id => id !== target.id);
-        }
-        await db.save();
-        return interaction.reply({ content: '✅ Kész!', ephemeral: true });
-    }
-
-    // MANIFEST GENERÁLÁS
+    // --- MANIFEST ÉS LUA KERESÉS ---
     if (interaction.commandName === 'manifest') {
-        if (db.allowedChannels.length > 0 && !db.allowedChannels.includes(interaction.channelId)) return interaction.reply({ content: '❌ Rossz csatorna!', ephemeral: true });
-        if (!db.allowedUsers.includes(interaction.user.id)) return interaction.reply({ content: '❌ Nincs jogod!', ephemeral: true });
-
-        const appId = interaction.options.getSubcommand() === 'id' ? interaction.options.getString('appid') : interaction.options.getString('jateknev');
+        const appId = interaction.options.getString('query');
         const includeDlc = interaction.options.getBoolean('dlc') ?? true;
-
         await interaction.deferReply({ ephemeral: true });
 
         try {
             const steamRes = await axios.get(`https://store.steampowered.com/api/appdetails?appids=${appId}`);
-            if (!steamRes.data[appId].success) return interaction.editReply("❌ Játék nem található.");
-
             const gameData = steamRes.data[appId].data;
             const dlcs = gameData.dlc || [];
-            
-            // LUA Generálás összes DLC-vel
-            let lua = `-- Generated by SteamTools Master\naddappid(${appId})\n`;
+
+            // 1. LUA Generálás (Precíz szintaxis)
+            let lua = `-- SteamTools Unlocker\naddappid(${appId})\n`;
             if (includeDlc) dlcs.forEach(id => lua += `addappid(${id})\n`);
+            const luaFile = new AttachmentBuilder(Buffer.from(lua), { name: `unlock_${appId}.lua` });
 
-            let files = [new AttachmentBuilder(Buffer.from(lua), { name: `unlock_${appId}.lua` })];
-            let statusLines = [`✅ **${gameData.name}** (.lua generálva)`];
-            if (includeDlc) statusLines.push(`🔹 DLC-k listázva: ${dlcs.length} db`);
+            // 2. Manifest fájl keresése a forrásokban
+            const manifest = await fetchFromSources(appId);
+            let files = [luaFile];
+            let status = [`✅ **${gameData.name}** feloldó (.lua) elkészült.`];
 
-            const zip = await fetchManifestZip(appId);
-            if (zip) {
-                files.push(new AttachmentBuilder(Buffer.from(zip.data), { name: `manifest_${appId}.zip` }));
-                statusLines.push(`✅ Manifest ZIP megtalálva.`);
+            if (manifest) {
+                files.push(new AttachmentBuilder(Buffer.from(manifest.data), { name: `manifest_${appId}.zip` }));
+                status.push(`✅ Manifest ZIP megtalálva: [${manifest.source}]`);
+            } else {
+                status.push(`⚠️ Kész manifest ZIP nem található (de a .lua fájl segít a letöltésben!)`);
             }
 
             const embed = new EmbedBuilder()
-                .setTitle(`📦 SteamTools: ${gameData.name}`)
+                .setTitle(`📦 Csomag: ${gameData.name}`)
                 .setColor(0x00FF00)
-                .setDescription(statusLines.join('\n') + '\n\n**Tipp:** Ha a Steam nem indul, töröld az `appinfo.vdf`-et!')
-                .setFooter({ text: `AppID: ${appId}` });
+                .setDescription(status.join('\n') + `\n🔹 **DLC-k száma:** ${dlcs.length}`);
 
             await interaction.editReply({ embeds: [embed], files: files });
+        } catch (e) { await interaction.editReply("❌ Hiba."); }
+    }
 
-        } catch (e) { await interaction.editReply("❌ Hiba történt."); }
+    // FIX PARANCS
+    if (interaction.commandName === 'fix') {
+        return interaction.reply({ content: "🛠️ **Steam hiba javítása:** Töröld az `appinfo.vdf` fájlt a `Steam/appcache` mappából!", ephemeral: true });
+    }
+
+    // ADMIN RÉSZ (MANAGE)
+    if (interaction.commandName === 'manage') {
+        if (interaction.user.id !== process.env.ADMIN_ID) return interaction.reply({ content: 'Nincs jogod!', ephemeral: true });
+        const sub = interaction.options.getSubcommand();
+        const target = interaction.options.getUser('target') || interaction.options.getChannel('target');
+        if (sub === 'user') db.allowedUsers.push(target.id);
+        if (sub === 'channel') db.allowedChannels.push(target.id);
+        await db.save();
+        return interaction.reply({ content: '✅ Beállítások elmentve!', ephemeral: true });
+    }
+});
+
+// Manuális fájl bedobás (Manilua)
+client.on('messageCreate', async message => {
+    if (message.author.bot || message.attachments.size === 0) return;
+    const hasFiles = message.attachments.some(a => a.name.endsWith('.manifest') || a.name === 'config.vdf');
+    if (hasFiles) {
+        const lua = await processToLua(message.attachments);
+        if (lua) {
+            const file = new AttachmentBuilder(Buffer.from(lua), { name: 'generated_unlock.lua' });
+            message.reply({ content: "✅ Észleltem a fájlokat! Itt a generált feloldó:", files: [file] });
+        }
     }
 });
 
