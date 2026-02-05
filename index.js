@@ -19,7 +19,7 @@ const Settings = mongoose.model('Settings', new mongoose.Schema({
     allowedChannels: [String]
 }));
 
-// --- MANIFEST ÉS FIX FORRÁSOK (ltsteamplugin & api.json alapján) ---
+// --- MANIFEST ÉS FIX FORRÁSOK (A GitHub api.json és fixes.py alapján) ---
 const MANIFEST_SOURCES = [
     { name: 'Morrenus (API)', url: (id) => `https://manifest.morrenus.xyz/api/v1/manifest/${id}?api_key=${process.env.MORRENUS_API_KEY}` },
     { name: 'Ryuu', url: (id) => `http://167.235.229.108/${id}` },
@@ -40,39 +40,6 @@ const client = new Client({
         GatewayIntentBits.MessageContent 
     ] 
 });
-
-// --- SLASH PARANCSOK DEFINIÁLÁSA (Eredeti szerkezeted alapján) ---
-const commands = [
-    new SlashCommandBuilder()
-        .setName('manifest')
-        .setDescription('SteamTools .lua generáló és Manifest kereső')
-        .addSubcommand(sub => 
-            sub.setName('id')
-                .setDescription('Generálás AppID alapján')
-                .addStringOption(o => o.setName('appid').setDescription('A játék AppID-ja').setRequired(true))
-                .addBooleanOption(o => o.setName('dlc').setDescription('DLC-k feloldása? (Alapértelmezett: True)')))
-        .addSubcommand(sub => 
-            sub.setName('nev')
-                .setDescription('Keresés név alapján')
-                .addStringOption(o => o.setName('jateknev').setDescription('Kezdd el gépelni a játék nevét').setRequired(true).setAutocomplete(true))
-                .addBooleanOption(o => o.setName('dlc').setDescription('DLC-k feloldása? (Alapértelmezett: True)'))),
-    
-    new SlashCommandBuilder()
-        .setName('manage')
-        .setDescription('Bot kezelése (Admin)')
-        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-        .addSubcommandGroup(group =>
-            group.setName('user')
-                .setDescription('Felhasználók kezelése')
-                .addSubcommand(sub => sub.setName('add').setDescription('Jogosultság adása').addUserOption(o => o.setName('target').setDescription('Felhasználó').setRequired(true)))
-                .addSubcommand(sub => sub.setName('remove').setDescription('Jogosultság elvétele').addUserOption(o => o.setName('target').setDescription('Felhasználó').setRequired(true)))
-                .addSubcommand(sub => sub.setName('list').setDescription('Engedélyezett felhasználók listája'))),
-
-    new SlashCommandBuilder()
-        .setName('fix')
-        .setDescription('Elérhető javítások (Fixes) ellenőrzése')
-        .addStringOption(o => o.setName('appid').setDescription('AppID vagy név').setRequired(true))
-].map(c => c.toJSON());
 
 // --- SEGÉDFÜGGVÉNYEK ---
 
@@ -102,17 +69,42 @@ async function fetchManifestZip(id) {
 
 client.once('ready', async () => {
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
+    const commands = [
+        new SlashCommandBuilder()
+            .setName('manifest')
+            .setDescription('SteamTools .lua generáló és Manifest kereső')
+            .addSubcommand(sub => 
+                sub.setName('id')
+                    .setDescription('Generálás AppID alapján')
+                    .addStringOption(o => o.setName('appid').setDescription('A játék AppID-ja').setRequired(true))
+                    .addBooleanOption(o => o.setName('dlc').setDescription('DLC-k feloldása?')))
+            .addSubcommand(sub => 
+                sub.setName('nev')
+                    .setDescription('Keresés név alapján')
+                    .addStringOption(o => o.setName('jateknev').setDescription('Játék neve').setRequired(true).setAutocomplete(true))
+                    .addBooleanOption(o => o.setName('dlc').setDescription('DLC-k feloldása?'))),
+        new SlashCommandBuilder()
+            .setName('manage')
+            .setDescription('Bot kezelése (Admin)')
+            .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+            .addSubcommand(sub => sub.setName('add').setDescription('Jog adása').addUserOption(o => o.setName('target').setRequired(true).setDescription('Felhasználó')))
+            .addSubcommand(sub => sub.setName('remove').setDescription('Jog elvétele').addUserOption(o => o.setName('target').setRequired(true).setDescription('Felhasználó'))),
+        new SlashCommandBuilder()
+            .setName('fix')
+            .setDescription('Online Fix ellenőrzése AppID alapján')
+            .addStringOption(o => o.setName('appid').setDescription('Játék AppID-ja').setRequired(true))
+    ].map(c => c.toJSON());
+
     try {
         await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
-        console.log(`✅ ${client.user.tag} kész és parancsok frissítve!`);
+        console.log(`✅ ${client.user.tag} online, parancsok frissítve!`);
     } catch (e) { console.error(e); }
 });
 
 client.on('interactionCreate', async interaction => {
-    // Autocomplete: Ez keres a nevek között, amíg gépelsz
+    // Autocomplete kezelése
     if (interaction.isAutocomplete()) {
         const focused = interaction.options.getFocused();
-        if (!focused) return interaction.respond([]);
         const url = `https://store.steampowered.com/api/storesearch/?term=${encodeURIComponent(focused)}&l=hungarian&cc=HU`;
         const res = await axios.get(url).catch(() => ({ data: { items: [] } }));
         const suggestions = res.data.items.map(g => ({ name: `${g.name.substring(0, 80)} (${g.id})`, value: g.id.toString() })).slice(0, 20);
@@ -121,16 +113,16 @@ client.on('interactionCreate', async interaction => {
 
     if (!interaction.isChatInputCommand()) return;
 
-    const { commandName, options, user, channelId } = interaction;
-    let db = await Settings.findOne() || await Settings.create({ allowedUsers: [process.env.ADMIN_ID], allowedChannels: [] });
+    const { commandName, options, user, member } = interaction;
+    let db = await Settings.findOne() || await Settings.create({ allowedUsers: [process.env.ADMIN_ID] });
 
     // JOGOSULTSÁG ELLENŐRZÉS
-    const isAdmin = interaction.member.permissions.has(PermissionFlagsBits.Administrator);
+    const isAdmin = member.permissions.has(PermissionFlagsBits.Administrator) || user.id === process.env.ADMIN_ID;
     if (!isAdmin && !db.allowedUsers.includes(user.id)) {
-        return interaction.reply({ content: '❌ Nincs jogosultságod a bot használatához!', ephemeral: true });
+        return interaction.reply({ content: '❌ Nincs jogosultságod!', ephemeral: true });
     }
 
-    // MANIFEST PARANCS
+    // MANIFEST & LUA GENERÁLÁS
     if (commandName === 'manifest') {
         const appId = options.getSubcommand() === 'id' ? options.getString('appid') : options.getString('jateknev');
         const includeDlc = options.getBoolean('dlc') ?? true;
@@ -144,7 +136,7 @@ client.on('interactionCreate', async interaction => {
             const gameData = steamRes.data[appId].data;
             const dlcs = gameData.dlc || [];
             
-            // LUA Generálás (Eredeti formátumod szerint)
+            // LUA Generálás (Eredeti formátumod megtartva)
             let lua = `-- Generated by SteamTools Master\n-- Game: ${gameData.name}\n\nadd_app(${appId}, "${gameData.name}")\n`;
             if (includeDlc) dlcs.forEach(id => lua += `add_dlc(${id})\n`);
 
@@ -155,11 +147,12 @@ client.on('interactionCreate', async interaction => {
                 .setTitle(`📦 SteamTools Master: ${gameData.name}`)
                 .setColor(0x00FF00)
                 .setThumbnail(gameData.header_image)
-                .setDescription(`✅ **.lua fájl generálva**\n${zip ? `✅ **Manifest ZIP megtalálva:** [${zip.source}]` : '⚠️ Manifest ZIP nem található (használd a .lua-t!)'}`)
+                .setDescription(`✅ **.lua fájl generálva**\n${zip ? `✅ **Manifest ZIP megtalálva:** [${zip.source}]` : '⚠️ Manifest ZIP nem található.'}`)
                 .addFields(
                     { name: 'AppID', value: appId, inline: true },
-                    { name: 'DLC-k', value: dlcs.length.toString(), inline: true },
-                    { name: 'Elérhető Fixek', value: `${fixes.generic ? '[Generic Fix](' + fixes.generic + ')' : '❌'} / ${fixes.online ? '[Online Fix](' + fixes.online + ')' : '❌'}` }
+                    { name: 'DLC-k száma', value: dlcs.length.toString(), inline: true },
+                    { name: 'Online Fix', value: fixes.online ? `✅ [Letöltés](${fixes.online})` : '❌ Nem található', inline: true },
+                    { name: 'Generic Fix', value: fixes.generic ? `✅ [Letöltés](${fixes.generic})` : '❌ Nem található', inline: true }
                 )
                 .setFooter({ text: 'A .lua fájlt húzd a SteamTools ikonjára!' });
 
@@ -169,36 +162,31 @@ client.on('interactionCreate', async interaction => {
             await interaction.editReply({ embeds: [embed], files: files });
 
         } catch (e) {
-            await interaction.editReply("❌ Hiba történt a lekérés során.");
+            await interaction.editReply("❌ Hiba történt a generálás során.");
         }
     }
 
     // ADMIN KEZELÉS
     if (commandName === 'manage') {
-        if (user.id !== process.env.ADMIN_ID && !isAdmin) return interaction.reply({ content: '❌ Nincs jogod!', ephemeral: true });
         const sub = options.getSubcommand();
         const target = options.getUser('target');
-
         if (sub === 'add') { if (!db.allowedUsers.includes(target.id)) db.allowedUsers.push(target.id); }
-        else if (sub === 'remove') db.allowedUsers = db.allowedUsers.filter(id => id !== target.id);
-        else if (sub === 'list') return interaction.reply({ content: `Jogosultak: ${db.allowedUsers.map(id => `<@${id}>`).join(', ')}`, ephemeral: true });
-        
+        else { db.allowedUsers = db.allowedUsers.filter(id => id !== target.id); }
         await db.save();
-        return interaction.reply({ content: '✅ Beállítások frissítve!', ephemeral: true });
+        return interaction.reply({ content: `✅ Felhasználó frissítve: ${target.tag}`, ephemeral: true });
     }
 
-    // FIX PARANCS (Különálló ellenőrzés)
+    // FIX KERESÉS
     if (commandName === 'fix') {
         const appId = options.getString('appid');
         await interaction.deferReply({ ephemeral: true });
         const fixes = await checkFixes(appId);
-        
         const embed = new EmbedBuilder()
-            .setTitle(`🛠️ Fixek ellenőrzése: ${appId}`)
+            .setTitle(`🛠️ Online Fix Ellenőrzés: ${appId}`)
             .setColor(0x3498db)
             .addFields(
-                { name: 'Generic Fix', value: fixes.generic ? `✅ [Letöltés](${fixes.generic})` : '❌ Nem található', inline: true },
-                { name: 'Online Fix', value: fixes.online ? `✅ [Letöltés](${fixes.online})` : '❌ Nem található', inline: true }
+                { name: 'Online Fix', value: fixes.online ? `✅ [Letöltés](${fixes.online})` : '❌ Nem található', inline: true },
+                { name: 'Generic Fix', value: fixes.generic ? `✅ [Letöltés](${fixes.generic})` : '❌ Nem található', inline: true }
             );
         await interaction.editReply({ embeds: [embed] });
     }
