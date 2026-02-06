@@ -42,9 +42,10 @@ async function fetchManifestZip(id) {
     for (const source of MANIFEST_SOURCES) {
         try {
             const url = source.url(id);
-            const res = await axios({ method: 'get', url: url, responseType: 'arraybuffer', timeout: 3500 });
+            // Letöltjük a memóriába
+            const res = await axios({ method: 'get', url: url, responseType: 'arraybuffer', timeout: 4000 });
             if (res.status === 200) {
-                // Visszaadjuk az URL-t is, hogy linkelni tudjuk, ha túl nagy
+                // Visszaadjuk az adatot ÉS az URL-t is (hogy tudjunk linkelni ha kell)
                 return { data: res.data, source: source.name, url: url }; 
             }
         } catch (e) { continue; }
@@ -54,11 +55,17 @@ async function fetchManifestZip(id) {
 
 async function getFile(url, fileName) {
     try {
+        // Először csak a méretet kérdezzük le (HEAD)
         const head = await axios.head(url, { timeout: 2500 }).catch(() => null);
         if (!head) return null;
+        
         const size = parseInt(head.headers['content-length'] || 0);
-        // Itt már volt védelem
-        if (size > 24 * 1024 * 1024) return { tooLarge: true, size: (size / 1024 / 1024).toFixed(1) };
+        const sizeInMB = (size / 1024 / 1024).toFixed(1);
+
+        // Ha nagyobb mint 24MB, akkor jelezzük, hogy TÚL NAGY
+        if (size > 24 * 1024 * 1024) return { tooLarge: true, size: sizeInMB };
+        
+        // Ha belefér, letöltjük
         const res = await axios.get(url, { responseType: 'arraybuffer', timeout: 15000 });
         return { attachment: new AttachmentBuilder(Buffer.from(res.data), { name: fileName }) };
     } catch (e) { return null; }
@@ -89,7 +96,7 @@ async function findFixes(appid, gameName) {
 
 client.on(Events.InteractionCreate, async interaction => {
     
-    // --- AUTOCOMPLETE (A jól működő verzió) ---
+    // --- AUTOCOMPLETE (Működő verzió) ---
     if (interaction.isAutocomplete()) {
         const focused = interaction.options.getFocused();
         if (!focused) return interaction.respond([]);
@@ -125,14 +132,15 @@ client.on(Events.InteractionCreate, async interaction => {
             let attachments = [];
             let statusText = "";
 
-            // --- 1. MANIFEST ZIP (ITT VOLT A HIBA) ---
+            // --- 1. MANIFEST ZIP KEZELÉS ---
             if (zip) {
-                // Ellenőrizzük a méretet: 24MB = 25165824 byte
+                // Ellenőrzés: Nagyobb mint 24 MB?
                 if (zip.data.length > 24 * 1024 * 1024) {
-                    // Ha TÚL NAGY, nem csatoljuk, csak linkeljük!
-                    statusText += `⚠️ **Manifest:** Túl nagy (${(zip.data.length / 1024 / 1024).toFixed(1)}MB) -> [Letöltés](${zip.url})\n`;
+                    // HA NAGY -> LINKET KÜLDÜNK
+                    const sizeMB = (zip.data.length / 1024 / 1024).toFixed(1);
+                    statusText += `⚠️ **Manifest:** Túl nagy (${sizeMB} MB) -> [Kattints a letöltéshez](${zip.url})\n`;
                 } else {
-                    // Ha belefér, csatoljuk
+                    // HA KICSI -> CSATOLJUK
                     attachments.push(new AttachmentBuilder(Buffer.from(zip.data), { name: `manifest_${appId}.zip` }));
                     statusText += `✅ **Manifest:** Fájl csatolva (Forrás: ${zip.source})\n`;
                 }
@@ -140,22 +148,25 @@ client.on(Events.InteractionCreate, async interaction => {
                 statusText += `⚠️ **Manifest:** Nem található a szervereken.\n`;
             }
 
-            // --- 2. LUA ---
-            // Infó a DLC-kről, de nem küldjük a LUA fájlt, mert a ZIP a fontos
+            // --- 2. LUA INFÓ ---
             let dlcCount = (gameData.dlc) ? gameData.dlc.length : 0;
             if (includeDlc && dlcCount > 0) {
-                statusText += `ℹ️ **DLC:** ${dlcCount} db feloldó kód a Manifestben.\n`;
+                statusText += `ℹ️ **DLC:** ${dlcCount} db feloldó kód (Benne van a Manifestben/LUA-ban)\n`;
             }
 
-            // --- 3. ONLINE FIX ---
+            // --- 3. ONLINE FIX KEZELÉS ---
             if (fix.url) {
                 const fileData = await getFile(fix.url, fix.name);
+                
                 if (fileData?.attachment) {
+                    // Ha sikerült letölteni és kicsi -> Csatoljuk
                     attachments.push(fileData.attachment);
                     statusText += `✅ **Online Fix:** Fájl csatolva (\`${fix.name}\`)`;
                 } else if (fileData?.tooLarge) {
-                    statusText += `⚠️ **Online Fix:** Túl nagy -> [Letöltés](${fix.url})`;
+                    // HA TÚL NAGY -> LINK
+                    statusText += `⚠️ **Online Fix:** Túl nagy (${fileData.size} MB) -> [Letöltés](${fix.url})`;
                 } else {
+                    // Ha egyéb hiba van -> Link
                     statusText += `🔗 **Online Fix:** [Letöltés](${fix.url})`;
                 }
             } else {
@@ -175,11 +186,10 @@ client.on(Events.InteractionCreate, async interaction => {
             await interaction.editReply({ embeds: [embed], files: attachments });
 
         } catch (e) {
-            console.error("Feltöltési hiba:", e.message);
-            // Ha még mindig hiba van (pl. 413), akkor fájlok nélkül válaszolunk
+            console.error("Végzetes hiba:", e);
             await interaction.editReply({ 
-                content: "❌ **Hiba történt:** A fájlok túl nagyok voltak a Discordnak. Próbáld meg később, vagy keress egy kisebb játékot.",
-                files: []
+                content: "❌ Hiba történt. Lehet, hogy a fájlok túl nagyok voltak. Próbáld újra.", 
+                files: [] 
             });
         }
     }
