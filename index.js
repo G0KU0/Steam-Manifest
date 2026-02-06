@@ -22,7 +22,6 @@ app.listen(process.env.PORT || 3000);
 // --- 3. ADATBÁZIS KAPCSOLÓDÁS ---
 mongoose.connect(process.env.MONGODB_URI).catch(err => console.error("MongoDB hiba:", err));
 
-// Felhasználó Adatbázis (Rang és Kvóta)
 const UserSchema = new mongoose.Schema({
     userId: { type: String, required: true, unique: true },
     rank: { type: Number, default: 1 }, 
@@ -31,7 +30,6 @@ const UserSchema = new mongoose.Schema({
 });
 const UserModel = mongoose.model('User', UserSchema);
 
-// Beállítások Adatbázis (Csatornák)
 const ConfigSchema = new mongoose.Schema({
     allowedChannels: [String]
 });
@@ -57,15 +55,12 @@ const client = new Client({
 
 // --- 5. SEGÉDFÜGGVÉNYEK ---
 
-// Kvóta ellenőrzés és reset
 async function checkQuota(userId) {
     const today = new Date().toISOString().split('T')[0]; 
     let user = await UserModel.findOne({ userId });
 
-    // Ha nincs benne az adatbázisban -> Tiltás
     if (!user) return { allowed: false, error: "❌ Nem vagy hozzáadva a rendszerhez! Kérj engedélyt az admintól." };
 
-    // Ha új nap van -> Nullázzuk a számlálót
     if (user.lastDate !== today) {
         user.dailyUsage = 0;
         user.lastDate = today;
@@ -80,7 +75,6 @@ async function checkQuota(userId) {
     return { allowed: true, user };
 }
 
-// Manifest letöltése
 async function fetchManifestZip(id) {
     for (const source of MANIFEST_SOURCES) {
         try {
@@ -94,14 +88,12 @@ async function fetchManifestZip(id) {
     return null;
 }
 
-// Fix letöltése (Méret ellenőrzéssel)
 async function getFile(url, fileName) {
     try {
         const head = await axios.head(url, { timeout: 2500 }).catch(() => null);
         if (!head) return null;
         
         const size = parseInt(head.headers['content-length'] || 0);
-        // Ha nagyobb mint 24MB -> Túl nagy
         if (size > 24 * 1024 * 1024) return { tooLarge: true, size: (size / 1024 / 1024).toFixed(1) };
         
         const res = await axios.get(url, { responseType: 'arraybuffer', timeout: 15000 });
@@ -109,7 +101,6 @@ async function getFile(url, fileName) {
     } catch (e) { return null; }
 }
 
-// Fix keresése (Név vagy ID alapján)
 async function findFixes(appid, gameName) {
     if (gameName) {
         const clean = gameName.replace(/[:™®]/g, "");
@@ -130,7 +121,7 @@ async function findFixes(appid, gameName) {
 
 client.on(Events.InteractionCreate, async interaction => {
     
-    // --- AUTOCOMPLETE (Azonnali keresés) ---
+    // --- AUTOCOMPLETE ---
     if (interaction.isAutocomplete()) {
         const focused = interaction.options.getFocused();
         if (!focused) return interaction.respond([]);
@@ -150,7 +141,6 @@ client.on(Events.InteractionCreate, async interaction => {
 
     // --- ADMIN RENDSZER ---
     if (interaction.commandName === 'admin') {
-        // Jogosultság ellenőrzés: Csak Admin vagy a Tulaj (ADMIN_ID)
         if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator) && interaction.user.id !== process.env.ADMIN_ID) {
             return interaction.reply({ content: "❌ Nincs jogosultságod!", ephemeral: true });
         }
@@ -206,13 +196,11 @@ client.on(Events.InteractionCreate, async interaction => {
         const appId = sub === 'id' ? interaction.options.getString('appid') : interaction.options.getString('jateknev');
         const includeDlc = interaction.options.getBoolean('dlc') ?? true;
 
-        // 1. Csatorna ellenőrzés
         let config = await ConfigModel.findOne();
         if (config && config.allowedChannels.length > 0 && !config.allowedChannels.includes(interaction.channelId)) {
             return interaction.reply({ content: "❌ Itt nem használhatod a botot! Menj a megfelelő csatornába.", ephemeral: true });
         }
 
-        // 2. Kvóta és Jogosultság ellenőrzés
         const quota = await checkQuota(interaction.user.id);
         if (!quota.allowed) {
             return interaction.reply({ content: quota.error, ephemeral: true });
@@ -231,14 +219,12 @@ client.on(Events.InteractionCreate, async interaction => {
             let attachments = [];
             let statusText = "";
 
-            // --- MANIFEST ZIP (Okos feltöltés) ---
+            // MANIFEST ZIP
             if (zip) {
-                // Ha nagyobb mint 24MB -> Csak link
                 if (zip.data.length > 24 * 1024 * 1024) {
                     const sizeMB = (zip.data.length / 1024 / 1024).toFixed(1);
                     statusText += `⚠️ **Manifest:** Túl nagy (${sizeMB} MB) -> [Letöltés](${zip.url})\n`;
                 } else {
-                    // Ha kicsi -> Csatoljuk
                     attachments.push(new AttachmentBuilder(Buffer.from(zip.data), { name: `manifest_${appId}.zip` }));
                     statusText += `✅ **Manifest:** Fájl csatolva\n`;
                 }
@@ -246,7 +232,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 statusText += `⚠️ **Manifest:** Nem található.\n`;
             }
 
-            // --- ONLINE FIX (Okos feltöltés) ---
+            // ONLINE FIX
             if (fix.url) {
                 const fileData = await getFile(fix.url, fix.name);
                 if (fileData?.attachment) {
@@ -259,7 +245,6 @@ client.on(Events.InteractionCreate, async interaction => {
                 }
             }
 
-            // --- SIKERES FUTÁS -> KVÓTA LEVONÁS ---
             quota.user.dailyUsage += 1;
             await quota.user.save();
             const remaining = LIMITS[quota.user.rank] === Infinity ? "∞" : LIMITS[quota.user.rank] - quota.user.dailyUsage;
@@ -284,7 +269,7 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 });
 
-// --- 7. INDÍTÁS ÉS PARANCSOK ---
+// --- 7. INDÍTÁS ÉS PARANCSOK (ITT VOLT A HIBA JAVÍTVA) ---
 client.once('ready', async () => {
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
     const commands = [
@@ -292,8 +277,16 @@ client.once('ready', async () => {
         new SlashCommandBuilder()
             .setName('manifest')
             .setDescription('Játék letöltése (Manifest + Fix)')
-            .addSubcommand(sub => sub.setName('id').setDescription('AppID alapján').addStringOption(o => o.setName('appid').setRequired(true)).addBooleanOption(o => o.setName('dlc').setDescription('DLC?')))
-            .addSubcommand(sub => sub.setName('nev').setDescription('Név alapján').addStringOption(o => o.setName('jateknev').setRequired(true).setAutocomplete(true)).addBooleanOption(o => o.setName('dlc').setDescription('DLC?'))),
+            .addSubcommand(sub => 
+                sub.setName('id')
+                   .setDescription('Generálás AppID alapján')
+                   .addStringOption(o => o.setName('appid').setDescription('A játék AppID-ja').setRequired(true))
+                   .addBooleanOption(o => o.setName('dlc').setDescription('DLC-k feloldása?')))
+            .addSubcommand(sub => 
+                sub.setName('nev')
+                   .setDescription('Keresés név alapján')
+                   .addStringOption(o => o.setName('jateknev').setDescription('A játék neve').setRequired(true).setAutocomplete(true))
+                   .addBooleanOption(o => o.setName('dlc').setDescription('DLC-k feloldása?'))),
         
         // Admin Parancs
         new SlashCommandBuilder()
@@ -302,14 +295,22 @@ client.once('ready', async () => {
             .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
             .addSubcommandGroup(group => group
                 .setName('user')
-                .setDescription('Felhasználók')
-                .addSubcommand(sub => sub.setName('add').setDescription('Hozzáadás').addUserOption(o => o.setName('target').setRequired(true)).addIntegerOption(o => o.setName('rank').setRequired(true).addChoices({ name: 'Rang 1 (15)', value: 1 }, { name: 'Rang 2 (30)', value: 2 }, { name: 'Rang 3 (∞)', value: 3 })))
-                .addSubcommand(sub => sub.setName('remove').setDescription('Törlés').addUserOption(o => o.setName('target').setRequired(true))))
+                .setDescription('Felhasználók kezelése')
+                .addSubcommand(sub => sub
+                    .setName('add')
+                    .setDescription('Hozzáadás')
+                    .addUserOption(o => o.setName('target').setDescription('A felhasználó').setRequired(true))
+                    .addIntegerOption(o => o.setName('rank').setDescription('A rang szintje').setRequired(true).addChoices(
+                        { name: 'Rang 1 (15)', value: 1 }, 
+                        { name: 'Rang 2 (30)', value: 2 }, 
+                        { name: 'Rang 3 (∞)', value: 3 }
+                    )))
+                .addSubcommand(sub => sub.setName('remove').setDescription('Törlés').addUserOption(o => o.setName('target').setDescription('A felhasználó').setRequired(true))))
             .addSubcommandGroup(group => group
                 .setName('channel')
-                .setDescription('Csatornák')
-                .addSubcommand(sub => sub.setName('add').setDescription('Engedélyezés').addChannelOption(o => o.setName('target').setDescription('Csatorna')))
-                .addSubcommand(sub => sub.setName('remove').setDescription('Tiltás').addChannelOption(o => o.setName('target').setDescription('Csatorna'))))
+                .setDescription('Csatornák kezelése')
+                .addSubcommand(sub => sub.setName('add').setDescription('Engedélyezés').addChannelOption(o => o.setName('target').setDescription('A csatorna')))
+                .addSubcommand(sub => sub.setName('remove').setDescription('Tiltás').addChannelOption(o => o.setName('target').setDescription('A csatorna'))))
     ].map(c => c.toJSON());
 
     const clientId = process.env.CLIENT_ID || client.user.id;
