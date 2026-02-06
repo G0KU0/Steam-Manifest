@@ -23,7 +23,7 @@ const Settings = mongoose.model('Settings', new mongoose.Schema({
 const FIX_SOURCES = {
     online: "https://files.luatools.work/OnlineFix1/",
     generic: "https://files.luatools.work/GameBypasses/",
-    ryuu_fixes: "https://generator.ryuu.lol/fixes/"
+    ryuu_fixes: "https://generator.ryuu.lol/fixes"
 };
 
 const MANIFEST_SOURCES = [
