@@ -1,7 +1,7 @@
 require('dotenv').config();
 const { 
     Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder, 
-    AttachmentBuilder, REST, Routes, PermissionFlagsBits 
+    AttachmentBuilder, REST, Routes, PermissionFlagsBits, Events 
 } = require('discord.js');
 const axios = require('axios');
 const mongoose = require('mongoose');
@@ -9,7 +9,7 @@ const express = require('express');
 
 // --- RENDER KONFIG ---
 const app = express();
-app.get('/', (req, res) => res.send('SteamTools Master Bot Online!'));
+app.get('/', (req, res) => res.send('SteamTools Master Bot is online!'));
 app.listen(process.env.PORT || 3000);
 
 // --- ADATBÁZIS ---
@@ -18,10 +18,10 @@ const Settings = mongoose.model('Settings', new mongoose.Schema({
     allowedUsers: [String]
 }));
 
-// --- FIX ÉS MANIFEST FORRÁSOK ---
+// --- FORRÁSOK ---
 const FIX_SOURCES = {
     online: "https://files.luatools.work/OnlineFix1/",
-    ryuu_fixes: "https://generator.ryuu.lol/fixes" // Per jel nélkül a végén
+    ryuu_fixes: "https://generator.ryuu.lol/fixes" 
 };
 
 const MANIFEST_SOURCES = [
@@ -41,9 +41,10 @@ async function getFile(url, fileName) {
         if (!head) return null;
 
         const size = parseInt(head.headers['content-length'] || 0);
+        // Discord feltöltési limit: 25MB
         if (size > 24 * 1024 * 1024) return { tooLarge: true, size: (size / 1024 / 1024).toFixed(1) };
 
-        const res = await axios.get(url, { responseType: 'arraybuffer', timeout: 12000 });
+        const res = await axios.get(url, { responseType: 'arraybuffer', timeout: 15000 });
         return { attachment: new AttachmentBuilder(Buffer.from(res.data), { name: fileName }) };
     } catch (e) { return null; }
 }
@@ -74,43 +75,24 @@ async function findFixes(appid, gameName) {
 
 // --- ESEMÉNYEK ---
 
-client.on('interactionCreate', async interaction => {
-    // --- AUTOCOMPLETE JAVÍTÁS ---
+client.on(Events.InteractionCreate, async interaction => {
+    // --- AUTOCOMPLETE (Visszaállítva az index (2).js alapján) ---
     if (interaction.isAutocomplete()) {
-        try {
-            const focusedOption = interaction.options.getFocused(true);
-            if (focusedOption.name !== 'jateknev') return;
-
-            const query = focusedOption.value;
-            if (!query || query.trim().length < 2) {
-                return await interaction.respond([]);
-            }
-
-            // Gyors kérés a Steam felé
-            const searchRes = await axios.get(`https://store.steampowered.com/api/storesearch/?term=${encodeURIComponent(query)}&l=hungarian&cc=HU`, { timeout: 2200 });
-            
-            if (!searchRes.data || !searchRes.data.items) return await interaction.respond([]);
-
-            const choices = searchRes.data.items.map(g => ({
-                name: `${g.name.substring(0, 80)} (${g.id})`,
-                value: g.id.toString()
-            })).slice(0, 20);
-
-            await interaction.respond(choices);
-        } catch (e) {
-            // Ha hiba van vagy lejárt az idő, üres választ küldünk, hogy ne fagyjon le
-            if (!interaction.responded) {
-                try { await interaction.respond([]); } catch (err) {}
-            }
-        }
-        return;
+        const focused = interaction.options.getFocused();
+        const url = `https://store.steampowered.com/api/storesearch/?term=${encodeURIComponent(focused)}&l=hungarian&cc=HU`;
+        const res = await axios.get(url).catch(() => ({ data: { items: [] } }));
+        const suggestions = res.data.items.map(g => ({ name: `${g.name.substring(0, 80)} (${g.id})`, value: g.id.toString() })).slice(0, 20);
+        return interaction.respond(suggestions);
     }
 
     if (!interaction.isChatInputCommand()) return;
 
     if (interaction.commandName === 'manifest') {
+        const sub = interaction.options.getSubcommand();
+        const appId = sub === 'id' ? interaction.options.getString('appid') : interaction.options.getString('jateknev');
+        const includeDlc = interaction.options.getBoolean('dlc') ?? true;
+
         await interaction.deferReply({ ephemeral: true });
-        const appId = interaction.options.getString('jateknev');
 
         try {
             const steamRes = await axios.get(`https://store.steampowered.com/api/appdetails?appids=${appId}&l=hungarian`);
@@ -146,7 +128,8 @@ client.on('interactionCreate', async interaction => {
                 .addFields(
                     { name: 'AppID', value: appId, inline: true },
                     { name: 'Fix állapota', value: fixStatus }
-                );
+                )
+                .setFooter({ text: "SteamTools Master | Subcommands: id / nev" });
 
             await interaction.editReply({ embeds: [embed], files: attachments });
 
@@ -162,12 +145,21 @@ client.once('ready', async () => {
         new SlashCommandBuilder()
             .setName('manifest')
             .setDescription('Manifest és Online Fix kereső')
-            .addStringOption(o => o.setName('jateknev').setDescription('Írd a játék nevét...').setRequired(true).setAutocomplete(true))
+            .addSubcommand(sub => 
+                sub.setName('id')
+                    .setDescription('Generálás AppID alapján')
+                    .addStringOption(o => o.setName('appid').setDescription('A játék AppID-ja').setRequired(true))
+                    .addBooleanOption(o => o.setName('dlc').setDescription('DLC-k feloldása?')))
+            .addSubcommand(sub => 
+                sub.setName('nev')
+                    .setDescription('Keresés név alapján')
+                    .addStringOption(o => o.setName('jateknev').setDescription('Kezdd el gépelni a játék nevét').setRequired(true).setAutocomplete(true))
+                    .addBooleanOption(o => o.setName('dlc').setDescription('DLC-k feloldása?')))
     ].map(c => c.toJSON());
 
     const clientId = process.env.CLIENT_ID || client.user.id;
     await rest.put(Routes.applicationCommands(clientId), { body: commands });
-    console.log(`✅ Bot online: ${client.user.tag}`);
+    console.log("✅ Bot online - Subcommand és Autocomplete javítva!");
 });
 
 client.login(process.env.DISCORD_TOKEN);
