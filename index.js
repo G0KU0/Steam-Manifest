@@ -9,7 +9,7 @@ const express = require('express');
 
 // --- RENDER KONFIG ---
 const app = express();
-app.get('/', (req, res) => res.send('SteamTools Master Bot is online!'));
+app.get('/', (req, res) => res.send('SteamTools Master Bot Online!'));
 app.listen(process.env.PORT || 3000);
 
 // --- ADATBÁZIS ---
@@ -21,7 +21,7 @@ const Settings = mongoose.model('Settings', new mongoose.Schema({
 // --- FORRÁSOK ---
 const FIX_SOURCES = {
     online: "https://files.luatools.work/OnlineFix1/",
-    ryuu_fixes: "https://generator.ryuu.lol/fixes" 
+    ryuu_fixes: "https://generator.ryuu.lol/fixes"
 };
 
 const MANIFEST_SOURCES = [
@@ -35,13 +35,13 @@ const client = new Client({
 
 // --- SEGÉDFÜGGVÉNYEK ---
 
+// Fájl letöltése és csatolása (24MB limit)
 async function getFile(url, fileName) {
     try {
         const head = await axios.head(url, { timeout: 2500 }).catch(() => null);
         if (!head) return null;
 
         const size = parseInt(head.headers['content-length'] || 0);
-        // Discord feltöltési limit: 25MB
         if (size > 24 * 1024 * 1024) return { tooLarge: true, size: (size / 1024 / 1024).toFixed(1) };
 
         const res = await axios.get(url, { responseType: 'arraybuffer', timeout: 15000 });
@@ -49,13 +49,14 @@ async function getFile(url, fileName) {
     } catch (e) { return null; }
 }
 
+// Fix keresés (Ryuu név alapján + Luatools AppID alapján)
 async function findFixes(appid, gameName) {
     if (gameName) {
         const clean = gameName.replace(/[:™®]/g, "");
         const patterns = [
             `${clean} Online Patch - Tested OK.zip`, 
             `${clean} - Tested OK.zip`, 
-            `${clean} Online.zip`,
+            `${clean} Online.zip`, 
             `${clean}.zip`
         ];
         
@@ -76,19 +77,34 @@ async function findFixes(appid, gameName) {
 // --- ESEMÉNYEK ---
 
 client.on(Events.InteractionCreate, async interaction => {
-    // --- AUTOCOMPLETE (Visszaállítva az index (2).js alapján) ---
+    // --- AUTOCOMPLETE (Visszaállítva a régi, gyors verzióra) ---
     if (interaction.isAutocomplete()) {
         const focused = interaction.options.getFocused();
-        const url = `https://store.steampowered.com/api/storesearch/?term=${encodeURIComponent(focused)}&l=hungarian&cc=HU`;
-        const res = await axios.get(url).catch(() => ({ data: { items: [] } }));
-        const suggestions = res.data.items.map(g => ({ name: `${g.name.substring(0, 80)} (${g.id})`, value: g.id.toString() })).slice(0, 20);
-        return interaction.respond(suggestions);
+        // Itt kivettem a limitet! Akár 1 betűre is keres.
+        if (!focused) return interaction.respond([]);
+
+        try {
+            const url = `https://store.steampowered.com/api/storesearch/?term=${encodeURIComponent(focused)}&l=hungarian&cc=HU`;
+            const res = await axios.get(url, { timeout: 2000 });
+            
+            const choices = res.data.items.map(g => ({ 
+                name: `${g.name.substring(0, 80)} (${g.id})`, 
+                value: g.id.toString() 
+            })).slice(0, 20);
+            
+            await interaction.respond(choices);
+        } catch (e) {
+            // Ha hiba van, csendben maradunk, nem fagyasztjuk le a botot
+            try { await interaction.respond([]); } catch (err) {}
+        }
+        return;
     }
 
     if (!interaction.isChatInputCommand()) return;
 
     if (interaction.commandName === 'manifest') {
         const sub = interaction.options.getSubcommand();
+        // Ha 'id' parancs, akkor azt olvassuk, ha 'nev', akkor a jateknev mezőt
         const appId = sub === 'id' ? interaction.options.getString('appid') : interaction.options.getString('jateknev');
         const includeDlc = interaction.options.getBoolean('dlc') ?? true;
 
@@ -108,7 +124,7 @@ client.on(Events.InteractionCreate, async interaction => {
             if (gameData.dlc) gameData.dlc.forEach(id => lua += `add_dlc(${id})\n`);
             attachments.push(new AttachmentBuilder(Buffer.from(lua), { name: `unlock_${appId}.lua` }));
 
-            // Fix feltöltés vagy link
+            // Fix (Fájl vagy Link)
             if (fix.url) {
                 const fileData = await getFile(fix.url, fix.name);
                 if (fileData?.attachment) {
@@ -127,9 +143,9 @@ client.on(Events.InteractionCreate, async interaction => {
                 .setColor(fix.url ? 0x00FF00 : 0x3498db)
                 .addFields(
                     { name: 'AppID', value: appId, inline: true },
-                    { name: 'Fix állapota', value: fixStatus }
+                    { name: 'Online Fix', value: fixStatus }
                 )
-                .setFooter({ text: "SteamTools Master | Subcommands: id / nev" });
+                .setFooter({ text: "SteamTools Master - Ryuu & Online Fix" });
 
             await interaction.editReply({ embeds: [embed], files: attachments });
 
@@ -145,6 +161,7 @@ client.once('ready', async () => {
         new SlashCommandBuilder()
             .setName('manifest')
             .setDescription('Manifest és Online Fix kereső')
+            // VISSZAÁLLÍTVA: Subcommand rendszer (id / nev)
             .addSubcommand(sub => 
                 sub.setName('id')
                     .setDescription('Generálás AppID alapján')
@@ -152,14 +169,14 @@ client.once('ready', async () => {
                     .addBooleanOption(o => o.setName('dlc').setDescription('DLC-k feloldása?')))
             .addSubcommand(sub => 
                 sub.setName('nev')
-                    .setDescription('Keresés név alapján')
+                    .setDescription('Keresés név alapján (Autocomplete)')
                     .addStringOption(o => o.setName('jateknev').setDescription('Kezdd el gépelni a játék nevét').setRequired(true).setAutocomplete(true))
                     .addBooleanOption(o => o.setName('dlc').setDescription('DLC-k feloldása?')))
     ].map(c => c.toJSON());
 
     const clientId = process.env.CLIENT_ID || client.user.id;
     await rest.put(Routes.applicationCommands(clientId), { body: commands });
-    console.log("✅ Bot online - Subcommand és Autocomplete javítva!");
+    console.log(`✅ Bot online: ${client.user.tag} - Parancsok visszaállítva!`);
 });
 
 client.login(process.env.DISCORD_TOKEN);
