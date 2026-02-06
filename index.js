@@ -7,14 +7,14 @@ const axios = require('axios');
 const mongoose = require('mongoose');
 const express = require('express');
 
-// --- 1. KONFIGURÁCIÓ (Limit szintek) ---
+// --- 1. KONFIGURÁCIÓ ---
 const LIMITS = {
-    1: 15,       // Rang 1: Napi 15 db
-    2: 30,       // Rang 2: Napi 30 db
-    3: Infinity  // Rang 3: Végtelen
+    1: 15,       // Rang 1
+    2: 30,       // Rang 2
+    3: Infinity  // Rang 3
 };
 
-// --- 2. WEBSZERVER ---
+// --- 2. WEBSZERVER (Renderhez) ---
 const app = express();
 app.get('/', (req, res) => res.send('SteamTools Master Bot Online!'));
 app.listen(process.env.PORT || 3000);
@@ -94,7 +94,9 @@ async function getFile(url, fileName) {
         if (!head) return null;
         
         const size = parseInt(head.headers['content-length'] || 0);
-        if (size > 24 * 1024 * 1024) return { tooLarge: true, size: (size / 1024 / 1024).toFixed(1) };
+        
+        // 10 MB LIMIT (Szigorú)
+        if (size > 10 * 1024 * 1024) return { tooLarge: true, size: (size / 1024 / 1024).toFixed(1) };
         
         const res = await axios.get(url, { responseType: 'arraybuffer', timeout: 15000 });
         return { attachment: new AttachmentBuilder(Buffer.from(res.data), { name: fileName }) };
@@ -120,47 +122,38 @@ async function findFixes(appid, gameName) {
 // --- 6. ESEMÉNYEK ---
 
 client.on(Events.InteractionCreate, async interaction => {
-    
     // Autocomplete
     if (interaction.isAutocomplete()) {
         const focused = interaction.options.getFocused();
         if (!focused) return interaction.respond([]);
-
         const url = `https://store.steampowered.com/api/storesearch/?term=${encodeURIComponent(focused)}&l=hungarian&cc=HU`;
         const res = await axios.get(url).catch(() => ({ data: { items: [] } }));
-        
-        const suggestions = res.data.items.map(g => ({ 
-            name: `${g.name.substring(0, 80)} (${g.id})`, 
-            value: g.id.toString() 
-        })).slice(0, 20);
-        
+        const suggestions = res.data.items.map(g => ({ name: `${g.name.substring(0, 80)} (${g.id})`, value: g.id.toString() })).slice(0, 20);
         return interaction.respond(suggestions);
     }
 
     if (!interaction.isChatInputCommand()) return;
 
-    // ADMIN
+    // ADMIN PARANCSOK
     if (interaction.commandName === 'admin') {
         if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator) && interaction.user.id !== process.env.ADMIN_ID) {
             return interaction.reply({ content: "❌ Nincs jogosultságod!", ephemeral: true });
         }
-
         const group = interaction.options.getSubcommandGroup();
         const sub = interaction.options.getSubcommand();
-
+        
         if (group === 'user') {
             const target = interaction.options.getUser('target');
             if (sub === 'add') {
                 const rank = interaction.options.getInteger('rank');
                 await UserModel.findOneAndUpdate({ userId: target.id }, { userId: target.id, rank: rank }, { upsert: true, new: true });
-                return interaction.reply({ content: `✅ **${target.tag}** rangja: **${rank}**`, ephemeral: true });
+                return interaction.reply({ content: `✅ **${target.tag}** rangja: **${rank}** (Limit: ${LIMITS[rank]})`, ephemeral: true });
             }
             if (sub === 'remove') {
                 await UserModel.findOneAndDelete({ userId: target.id });
                 return interaction.reply({ content: `🗑️ **${target.tag}** törölve.`, ephemeral: true });
             }
         }
-
         if (group === 'channel') {
             const targetChannel = interaction.options.getChannel('target') || interaction.channel;
             let config = await ConfigModel.findOne() || await ConfigModel.create({ allowedChannels: [] });
@@ -180,11 +173,11 @@ client.on(Events.InteractionCreate, async interaction => {
         }
     }
 
-    // MANIFEST
+    // MANIFEST PARANCS
     if (interaction.commandName === 'manifest') {
         const sub = interaction.options.getSubcommand();
         const appId = sub === 'id' ? interaction.options.getString('appid') : interaction.options.getString('jateknev');
-
+        
         let config = await ConfigModel.findOne();
         if (config && config.allowedChannels.length > 0 && !config.allowedChannels.includes(interaction.channelId)) {
             return interaction.reply({ content: "❌ Rossz csatorna!", ephemeral: true });
@@ -206,9 +199,9 @@ client.on(Events.InteractionCreate, async interaction => {
             let attachments = [];
             let statusText = "";
 
-            // --- 1. MANIFEST VIZSGÁLATA ---
+            // 1. MANIFEST (10 MB LIMIT)
             if (zip) {
-                if (zip.data.length > 24 * 1024 * 1024) {
+                if (zip.data.length > 10 * 1024 * 1024) { 
                     const sizeMB = (zip.data.length / 1024 / 1024).toFixed(1);
                     statusText += `⚠️ **Manifest:** Túl nagy (${sizeMB} MB) -> [Letöltés](${zip.url})\n`;
                 } else {
@@ -219,10 +212,9 @@ client.on(Events.InteractionCreate, async interaction => {
                 statusText += `⚠️ **Manifest:** Nincs találat.\n`;
             }
 
-            // --- 2. ONLINE FIX VIZSGÁLATA ---
+            // 2. ONLINE FIX (10 MB LIMIT)
             if (fix.url) {
                 const fileData = await getFile(fix.url, fix.name);
-                
                 if (fileData?.attachment) {
                     attachments.push(fileData.attachment);
                     statusText += `✅ **Online Fix:** Fájl csatolva\n`;
@@ -233,7 +225,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 }
             }
 
-            // KVÓTA SZÁMÍTÁS
+            // KVÓTA LEVONÁS
             quota.user.dailyUsage += 1;
             await quota.user.save();
             const remaining = LIMITS[quota.user.rank] === Infinity ? "∞" : LIMITS[quota.user.rank] - quota.user.dailyUsage;
@@ -246,25 +238,24 @@ client.on(Events.InteractionCreate, async interaction => {
                 .addFields(
                     { name: 'AppID', value: appId, inline: true },
                     { name: 'Fájlok', value: statusText },
-                    // ITT JELENIK MEG A KVÓTA
                     { name: 'Napi Kvóta', value: quotaText }
                 )
                 .setFooter({ text: "SteamTools Master" });
 
-            // --- FAIL-SAFE KÜLDÉS ---
+            // 3. KÜLDÉS (FAIL-SAFE MÓD)
             try {
                 await interaction.editReply({ embeds: [embed], files: attachments });
             } catch (sendError) {
-                console.log("Még mindig túl nagy az összméret, minden linkre vált.");
+                console.log("Feltöltési hiba, váltás linkre:", sendError.message);
                 
                 let fallbackText = "";
                 if (zip) fallbackText += `🔗 **Manifest:** [LETÖLTÉS LINK](${zip.url})\n`;
                 if (fix.url) fallbackText += `🔗 **Online Fix:** [LETÖLTÉS LINK](${fix.url})\n`;
                 
                 const fallbackEmbed = new EmbedBuilder()
-                    .setTitle(`📦 ${gameData.name} (Link Mód)`)
-                    .setDescription(`⚠️ **A csomag összmérete túl nagy volt.**\nKérlek töltsd le őket külön:\n\n${fallbackText}`)
-                    .addFields({ name: 'Napi Kvóta', value: quotaText }) // ITT IS MEGJELENIK
+                    .setTitle(`📦 ${gameData.name} (Biztonsági Link Mód)`)
+                    .setDescription(`⚠️ **A csomag túl nagy volt a Discordnak.**\nKérlek töltsd le őket innen:\n\n${fallbackText}`)
+                    .addFields({ name: 'Napi Kvóta', value: quotaText })
                     .setThumbnail(gameData.header_image)
                     .setColor(0xFFA500);
 
@@ -278,7 +269,7 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 });
 
-// --- 7. START ---
+// --- 7. START ÉS REGISZTRÁCIÓ ---
 client.once('ready', async () => {
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
     const commands = [
