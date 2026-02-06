@@ -57,6 +57,7 @@ async function getFile(url, fileName) {
         const head = await axios.head(url, { timeout: 2500 }).catch(() => null);
         if (!head) return null;
         const size = parseInt(head.headers['content-length'] || 0);
+        // Itt már volt védelem
         if (size > 24 * 1024 * 1024) return { tooLarge: true, size: (size / 1024 / 1024).toFixed(1) };
         const res = await axios.get(url, { responseType: 'arraybuffer', timeout: 15000 });
         return { attachment: new AttachmentBuilder(Buffer.from(res.data), { name: fileName }) };
@@ -88,11 +89,11 @@ async function findFixes(appid, gameName) {
 
 client.on(Events.InteractionCreate, async interaction => {
     
-    // --- AUTOCOMPLETE ---
+    // --- AUTOCOMPLETE (A jól működő verzió) ---
     if (interaction.isAutocomplete()) {
         const focused = interaction.options.getFocused();
         if (!focused) return interaction.respond([]);
-        
+
         const url = `https://store.steampowered.com/api/storesearch/?term=${encodeURIComponent(focused)}&l=hungarian&cc=HU`;
         const res = await axios.get(url).catch(() => ({ data: { items: [] } }));
         
@@ -124,12 +125,14 @@ client.on(Events.InteractionCreate, async interaction => {
             let attachments = [];
             let statusText = "";
 
-            // 1. MANIFEST ZIP (Biztonsági ellenőrzéssel)
+            // --- 1. MANIFEST ZIP (ITT VOLT A HIBA) ---
             if (zip) {
-                // Itt ellenőrizzük a méretet! (24MB limit)
+                // Ellenőrizzük a méretet: 24MB = 25165824 byte
                 if (zip.data.length > 24 * 1024 * 1024) {
+                    // Ha TÚL NAGY, nem csatoljuk, csak linkeljük!
                     statusText += `⚠️ **Manifest:** Túl nagy (${(zip.data.length / 1024 / 1024).toFixed(1)}MB) -> [Letöltés](${zip.url})\n`;
                 } else {
+                    // Ha belefér, csatoljuk
                     attachments.push(new AttachmentBuilder(Buffer.from(zip.data), { name: `manifest_${appId}.zip` }));
                     statusText += `✅ **Manifest:** Fájl csatolva (Forrás: ${zip.source})\n`;
                 }
@@ -137,13 +140,14 @@ client.on(Events.InteractionCreate, async interaction => {
                 statusText += `⚠️ **Manifest:** Nem található a szervereken.\n`;
             }
 
-            // 2. LUA (Csak infó)
+            // --- 2. LUA ---
+            // Infó a DLC-kről, de nem küldjük a LUA fájlt, mert a ZIP a fontos
             let dlcCount = (gameData.dlc) ? gameData.dlc.length : 0;
             if (includeDlc && dlcCount > 0) {
-                statusText += `ℹ️ **DLC:** ${dlcCount} db feloldása (LUA generálva)\n`;
+                statusText += `ℹ️ **DLC:** ${dlcCount} db feloldó kód a Manifestben.\n`;
             }
 
-            // 3. ONLINE FIX
+            // --- 3. ONLINE FIX ---
             if (fix.url) {
                 const fileData = await getFile(fix.url, fix.name);
                 if (fileData?.attachment) {
@@ -166,14 +170,17 @@ client.on(Events.InteractionCreate, async interaction => {
                     { name: 'AppID', value: appId, inline: true },
                     { name: 'Fájlok állapota', value: statusText }
                 )
-                .setFooter({ text: "SteamTools Master - Safe Mode" });
+                .setFooter({ text: "SteamTools Master" });
 
             await interaction.editReply({ embeds: [embed], files: attachments });
 
         } catch (e) {
-            console.error(e); // A Render logban látni fogod, mi volt a baj
-            // Ha a Discord elutasítja a fájlt (413), akkor küldünk egy hibaüzenetet fájlok nélkül
-            await interaction.editReply({ content: "❌ Hiba történt (Valószínűleg túl nagy a fájl), próbáld újra később.", files: [] });
+            console.error("Feltöltési hiba:", e.message);
+            // Ha még mindig hiba van (pl. 413), akkor fájlok nélkül válaszolunk
+            await interaction.editReply({ 
+                content: "❌ **Hiba történt:** A fájlok túl nagyok voltak a Discordnak. Próbáld meg később, vagy keress egy kisebb játékot.",
+                files: []
+            });
         }
     }
 });
