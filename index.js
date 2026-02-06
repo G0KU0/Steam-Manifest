@@ -84,18 +84,12 @@ async function findFixes(appid, gameName) {
 
 client.on(Events.InteractionCreate, async interaction => {
     
-    // --- AUTOCOMPLETE (AZ EREDETI KÓDOD ALAPJÁN) ---
-    // Ez pontosan ugyanaz a logika, mint az index (2).js-ben
+    // --- AUTOCOMPLETE (Maradt a jól működő verzió) ---
     if (interaction.isAutocomplete()) {
         const focused = interaction.options.getFocused();
-        
-        // Ha üres a mező, nem küldünk semmit (vagy visszatérünk üres listával)
-        // De ha beírsz 1 betűt, már futni fog!
         if (!focused) return interaction.respond([]);
 
         const url = `https://store.steampowered.com/api/storesearch/?term=${encodeURIComponent(focused)}&l=hungarian&cc=HU`;
-        
-        // Nincs try-catch, hogy lássuk a hibát, vagy a catch üreset ad vissza
         const res = await axios.get(url).catch(() => ({ data: { items: [] } }));
         
         const suggestions = res.data.items.map(g => ({ 
@@ -105,7 +99,6 @@ client.on(Events.InteractionCreate, async interaction => {
         
         return interaction.respond(suggestions);
     }
-    // ------------------------------------------------
 
     if (!interaction.isChatInputCommand()) return;
 
@@ -121,51 +114,54 @@ client.on(Events.InteractionCreate, async interaction => {
             if (!steamRes.data[appId]?.success) return interaction.editReply("❌ Játék nem található.");
 
             const gameData = steamRes.data[appId].data;
-            
-            // Fixek és Manifest keresése
             const fix = await findFixes(appId, gameData.name);
             const zip = await fetchManifestZip(appId);
             
             let attachments = [];
             let statusText = "";
 
-            // 1. LUA fájl
-            let lua = `-- SteamTools Master Unlocker\nadd_app(${appId}, "${gameData.name}")\n`;
-            if (gameData.dlc) gameData.dlc.forEach(id => lua += `add_dlc(${id})\n`);
+            // --- 1. CSAK EZT A FÁJLT KÜLDJÜK (Ami mindent tud) ---
+            let lua = `-- SteamTools Master Unlocker\n-- Game: ${gameData.name}\n\nadd_app(${appId}, "${gameData.name}")\n`;
+            if (gameData.dlc && includeDlc) {
+                gameData.dlc.forEach(id => lua += `add_dlc(${id})\n`);
+                statusText += `✅ **DLC-k:** ${gameData.dlc.length} db hozzáadva a fájlhoz!\n`;
+            } else {
+                statusText += `ℹ️ **DLC:** Nincs DLC vagy ki lett kapcsolva.\n`;
+            }
+            // Itt adjuk hozzá az EGYETLEN fontos fájlt
             attachments.push(new AttachmentBuilder(Buffer.from(lua), { name: `unlock_${appId}.lua` }));
 
-            // 2. Manifest
+            // --- 2. MANIFEST (Csak infó, fájlt NEM küldünk) ---
             if (zip) {
-                attachments.push(new AttachmentBuilder(Buffer.from(zip.data), { name: `manifest_${appId}.zip` }));
-                statusText += `✅ **Manifest:** ${zip.source}\n`;
+                // KIVETTEM: attachments.push(...) -> Nem küldi el a ZIP-et, hogy ne zavarjon
+                statusText += `✅ **Manifest:** Elérhető a szerveren (${zip.source}), de a LUA elég a feloldáshoz.\n`;
             } else {
-                statusText += `⚠️ **Manifest:** Nincs találat\n`;
+                statusText += `⚠️ **Manifest:** Nem található külön fájlként.\n`;
             }
 
-            // 3. Fix (Fájl vagy Link)
+            // --- 3. FIX (Csak ha van, és fontos) ---
             if (fix.url) {
                 const fileData = await getFile(fix.url, fix.name);
                 if (fileData?.attachment) {
                     attachments.push(fileData.attachment);
-                    statusText += `✅ **Fix:** Fájl csatolva (\`${fix.name}\`)`;
+                    statusText += `✅ **Online Fix:** Mellékelve (\`${fix.name}\`)`;
                 } else if (fileData?.tooLarge) {
-                    statusText += `⚠️ **Fix:** Túl nagy -> [Letöltés](${fix.url})`;
+                    statusText += `⚠️ **Online Fix:** Túl nagy -> [Letöltés](${fix.url})`;
                 } else {
-                    statusText += `🔗 **Fix:** [Letöltés](${fix.url})`;
+                    statusText += `🔗 **Online Fix:** [Letöltés](${fix.url})`;
                 }
-            } else {
-                statusText += `❌ **Fix:** Nincs javítás`;
             }
 
             const embed = new EmbedBuilder()
                 .setTitle(`📦 ${gameData.name}`)
                 .setThumbnail(gameData.header_image)
-                .setColor(zip ? 0x00FF00 : 0xFFA500)
+                .setColor(0x00FF00)
+                .setDescription(`**Letöltötted az "All-in-One" feloldó fájlt!**\nEbben benne van az alapjáték és az összes DLC kódja is.`)
                 .addFields(
                     { name: 'AppID', value: appId, inline: true },
-                    { name: 'Info', value: statusText }
+                    { name: 'Részletek', value: statusText }
                 )
-                .setFooter({ text: "SteamTools Master" });
+                .setFooter({ text: "Húzd a .lua fájlt a SteamTools-ra!" });
 
             await interaction.editReply({ embeds: [embed], files: attachments });
 
@@ -181,17 +177,17 @@ client.once('ready', async () => {
     const commands = [
         new SlashCommandBuilder()
             .setName('manifest')
-            .setDescription('Manifest és Online Fix kereső')
+            .setDescription('All-in-One feloldó generálása')
             .addSubcommand(sub => 
                 sub.setName('id')
                     .setDescription('Generálás AppID alapján')
-                    .addStringOption(o => o.setName('appid').setDescription('A játék AppID-ja').setRequired(true))
-                    .addBooleanOption(o => o.setName('dlc').setDescription('DLC-k feloldása?')))
+                    .addStringOption(o => o.setName('appid').setDescription('AppID').setRequired(true))
+                    .addBooleanOption(o => o.setName('dlc').setDescription('DLC-k?')))
             .addSubcommand(sub => 
                 sub.setName('nev')
                     .setDescription('Keresés név alapján')
-                    .addStringOption(o => o.setName('jateknev').setDescription('Kezdd el gépelni a játék nevét').setRequired(true).setAutocomplete(true))
-                    .addBooleanOption(o => o.setName('dlc').setDescription('DLC-k feloldása?')))
+                    .addStringOption(o => o.setName('jateknev').setDescription('Játék neve').setRequired(true).setAutocomplete(true))
+                    .addBooleanOption(o => o.setName('dlc').setDescription('DLC-k?')))
     ].map(c => c.toJSON());
 
     const clientId = process.env.CLIENT_ID || client.user.id;
