@@ -33,11 +33,7 @@ const MANIFEST_SOURCES = [
 ];
 
 const client = new Client({ 
-    intents: [
-        GatewayIntentBits.Guilds, 
-        GatewayIntentBits.GuildMessages, 
-        GatewayIntentBits.MessageContent
-    ] 
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages] 
 });
 
 // --- SEGÉDFÜGGVÉNYEK ---
@@ -88,16 +84,28 @@ async function findFixes(appid, gameName) {
 
 client.on(Events.InteractionCreate, async interaction => {
     
-    // --- AUTOCOMPLETE (EZ AZ EREDETI KÓDOD, AMI JÓ VOLT) ---
+    // --- AUTOCOMPLETE (AZ EREDETI KÓDOD ALAPJÁN) ---
+    // Ez pontosan ugyanaz a logika, mint az index (2).js-ben
     if (interaction.isAutocomplete()) {
         const focused = interaction.options.getFocused();
-        // Itt NINCS semmilyen korlátozás, egyből küldi a kérést a Steamnek
+        
+        // Ha üres a mező, nem küldünk semmit (vagy visszatérünk üres listával)
+        // De ha beírsz 1 betűt, már futni fog!
+        if (!focused) return interaction.respond([]);
+
         const url = `https://store.steampowered.com/api/storesearch/?term=${encodeURIComponent(focused)}&l=hungarian&cc=HU`;
+        
+        // Nincs try-catch, hogy lássuk a hibát, vagy a catch üreset ad vissza
         const res = await axios.get(url).catch(() => ({ data: { items: [] } }));
-        const suggestions = res.data.items.map(g => ({ name: `${g.name.substring(0, 80)} (${g.id})`, value: g.id.toString() })).slice(0, 20);
+        
+        const suggestions = res.data.items.map(g => ({ 
+            name: `${g.name.substring(0, 80)} (${g.id})`, 
+            value: g.id.toString() 
+        })).slice(0, 20);
+        
         return interaction.respond(suggestions);
     }
-    // -------------------------------------------------------
+    // ------------------------------------------------
 
     if (!interaction.isChatInputCommand()) return;
 
@@ -113,18 +121,20 @@ client.on(Events.InteractionCreate, async interaction => {
             if (!steamRes.data[appId]?.success) return interaction.editReply("❌ Játék nem található.");
 
             const gameData = steamRes.data[appId].data;
+            
+            // Fixek és Manifest keresése
             const fix = await findFixes(appId, gameData.name);
             const zip = await fetchManifestZip(appId);
             
             let attachments = [];
             let statusText = "";
 
-            // LUA
+            // 1. LUA fájl
             let lua = `-- SteamTools Master Unlocker\nadd_app(${appId}, "${gameData.name}")\n`;
             if (gameData.dlc) gameData.dlc.forEach(id => lua += `add_dlc(${id})\n`);
             attachments.push(new AttachmentBuilder(Buffer.from(lua), { name: `unlock_${appId}.lua` }));
 
-            // Manifest
+            // 2. Manifest
             if (zip) {
                 attachments.push(new AttachmentBuilder(Buffer.from(zip.data), { name: `manifest_${appId}.zip` }));
                 statusText += `✅ **Manifest:** ${zip.source}\n`;
@@ -132,7 +142,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 statusText += `⚠️ **Manifest:** Nincs találat\n`;
             }
 
-            // Fix
+            // 3. Fix (Fájl vagy Link)
             if (fix.url) {
                 const fileData = await getFile(fix.url, fix.name);
                 if (fileData?.attachment) {
@@ -160,6 +170,7 @@ client.on(Events.InteractionCreate, async interaction => {
             await interaction.editReply({ embeds: [embed], files: attachments });
 
         } catch (e) {
+            console.error(e);
             await interaction.editReply("❌ Hiba történt.");
         }
     }
