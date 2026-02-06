@@ -7,83 +7,95 @@ const axios = require('axios');
 const mongoose = require('mongoose');
 const express = require('express');
 
-// --- KONFIGURÁCIÓ ---
-const DISCORD_FILE_LIMIT = 24 * 1024 * 1024; // 24MB (biztonsági pufferrel)
-
+// --- RENDER KONFIG ---
 const app = express();
-app.get('/', (req, res) => res.send('Bot is running!'));
+app.get('/', (req, res) => res.send('SteamTools Master Bot Online!'));
 app.listen(process.env.PORT || 3000);
 
+// --- ADATBÁZIS ---
 mongoose.connect(process.env.MONGODB_URI).catch(err => console.error("MongoDB hiba:", err));
 const Settings = mongoose.model('Settings', new mongoose.Schema({
-    allowedUsers: [String],
-    allowedChannels: [String]
+    allowedUsers: [String]
 }));
 
+// --- FORRÁSOK (Javítva a Ryuu útvonal a visszajelzésed alapján) ---
 const FIX_SOURCES = {
     online: "https://files.luatools.work/OnlineFix1/",
-    generic: "https://files.luatools.work/GameBypasses/",
-    ryuu_fixes: "https://generator.ryuu.lol/fixes"
+    ryuu_fixes: "https://generator.ryuu.lol/fixes" // Itt töröltem a / jelet a végéről
 };
 
 const MANIFEST_SOURCES = [
-    { name: 'Morrenus (API)', url: (id) => `https://manifest.morrenus.xyz/api/v1/manifest/${id}?api_key=${process.env.MORRENUS_API_KEY}` },
-    { name: 'Ryuu', url: (id) => `http://167.235.229.108/${id}` },
-    { name: 'Sushi', url: (id) => `https://raw.githubusercontent.com/sushi-dev55-alt/sushitools-games-repo-alt/refs/heads/main/${id}.zip` }
+    { name: 'Morrenus', url: (id) => `https://manifest.morrenus.xyz/api/v1/manifest/${id}?api_key=${process.env.MORRENUS_API_KEY}` },
+    { name: 'Ryuu', url: (id) => `http://167.235.229.108/${id}` }
 ];
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages] });
 
 // --- SEGÉDFÜGGVÉNYEK ---
 
-// Letölti a fájlt és AttachmentBuilder-t készít belőle, ha nem túl nagy
-async function getFileAttachment(url, fileName) {
+// Fájl letöltése és Attachment készítése (25MB limit kezeléssel)
+async function getFile(url, fileName) {
     try {
-        const head = await axios.head(url).catch(() => null);
+        const head = await axios.head(url, { timeout: 3000 }).catch(() => null);
         if (!head) return null;
 
         const size = parseInt(head.headers['content-length'] || 0);
-        
-        // Ha túl nagy a fájl, nem töltjük le, csak jelezzük
-        if (size > DISCORD_FILE_LIMIT) return { tooLarge: true, size: (size / 1024 / 1024).toFixed(2) };
+        // Discord limit: 25MB (itt 24-nél megállunk a biztonság kedvéért)
+        if (size > 24 * 1024 * 1024) return { tooLarge: true, size: (size / 1024 / 1024).toFixed(1) };
 
-        const response = await axios.get(url, { responseType: 'arraybuffer', timeout: 10000 });
-        return { 
-            attachment: new AttachmentBuilder(Buffer.from(response.data), { name: fileName }),
-            tooLarge: false 
-        };
-    } catch (e) {
-        return null;
-    }
+        const res = await axios.get(url, { responseType: 'arraybuffer', timeout: 15000 });
+        return { attachment: new AttachmentBuilder(Buffer.from(res.data), { name: fileName }) };
+    } catch (e) { return null; }
 }
 
-async function checkFixes(appid, gameName) {
-    const results = { generic: null, online: null, ryuu: null };
-    try {
-        const onlineUrl = `${FIX_SOURCES.online}${appid}.zip`;
-        if ((await axios.head(onlineUrl).catch(() => null))?.status === 200) results.online = onlineUrl;
-
-        if (gameName) {
-            const cleanName = gameName.replace(/[:™®]/g, ""); 
-            const patterns = [`${cleanName} Online Patch - Tested OK.zip`, `${cleanName} - Tested OK.zip`, `${cleanName}.zip` ];
-            for (const p of patterns) {
-                const url = `${FIX_SOURCES.ryuu_fixes}${encodeURIComponent(p)}`;
-                if ((await axios.head(url).catch(() => null))?.status === 200) { results.ryuu = url; break; }
-            }
+async function findFixes(appid, gameName) {
+    // Ryuu keresés név alapján (az index.html-ben látott Puppet Team / Online minták alapján)
+    if (gameName) {
+        const clean = gameName.replace(/[:™®]/g, "");
+        const patterns = [
+            `${clean} Online Patch - Tested OK.zip`, 
+            `${clean} - Tested OK.zip`, 
+            `${clean} Online.zip`,
+            `${clean}.zip`
+        ];
+        
+        for (const p of patterns) {
+            // Itt rakjuk ki manuálisan a / jelet a bázis és a fájlnév közé
+            const url = `${FIX_SOURCES.ryuu_fixes}/${encodeURIComponent(p)}`;
+            const check = await axios.head(url).catch(() => null);
+            if (check && check.status === 200) return { url, name: p };
         }
-    } catch (e) {}
-    return results;
+    }
+
+    // Ha nincs Ryuu fix, megnézzük AppID alapján a Luatools-on
+    const onlineUrl = `${FIX_SOURCES.online}${appid}.zip`;
+    const checkOnline = await axios.head(onlineUrl).catch(() => null);
+    if (checkOnline && checkOnline.status === 200) return { url: onlineUrl, name: `OnlineFix_${appid}.zip` };
+    
+    return { url: null, name: "" };
 }
 
 // --- ESEMÉNYEK ---
 
 client.on(Events.InteractionCreate, async interaction => {
+    // Villámgyors Autocomplete a név szerinti kereséshez
     if (interaction.isAutocomplete()) {
-        const focused = interaction.options.getFocused();
-        const url = `https://store.steampowered.com/api/storesearch/?term=${encodeURIComponent(focused)}&l=hungarian`;
-        const res = await axios.get(url).catch(() => ({ data: { items: [] } }));
-        const choices = res.data.items.map(g => ({ name: `${g.name} (${g.id})`, value: g.id.toString() })).slice(0, 15);
-        return interaction.respond(choices);
+        try {
+            const focusedValue = interaction.options.getFocused();
+            if (!focusedValue || focusedValue.length < 2) return interaction.respond([]);
+
+            const res = await axios.get(`https://store.steampowered.com/api/storesearch/?term=${encodeURIComponent(focusedValue)}&l=hungarian&cc=HU`, { timeout: 2000 });
+            
+            const choices = res.data.items.map(g => ({
+                name: `${g.name.substring(0, 80)} (${g.id})`,
+                value: g.id.toString()
+            })).slice(0, 20);
+
+            await interaction.respond(choices);
+        } catch (e) {
+            if (!interaction.responded) await interaction.respond([]);
+        }
+        return;
     }
 
     if (!interaction.isChatInputCommand()) return;
@@ -91,58 +103,65 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.commandName === 'manifest') {
         await interaction.deferReply({ ephemeral: true });
         const appId = interaction.options.getString('jateknev');
-        
+
         try {
             const steamRes = await axios.get(`https://store.steampowered.com/api/appdetails?appids=${appId}&l=hungarian`);
+            if (!steamRes.data[appId]?.success) return interaction.editReply("❌ Játék nem található.");
+
             const gameData = steamRes.data[appId].data;
-
-            const fixes = await checkFixes(appId, gameData.name);
-            const manifestSources = await axios.get(MANIFEST_SOURCES[1].url(appId), { responseType: 'arraybuffer' }).catch(() => null);
-
+            const fix = await findFixes(appId, gameData.name);
             let attachments = [];
-            let fixInfo = "";
+            let fixStatus = "❌ Nem található javítás a szervereken.";
 
-            // .LUA fájl generálása
-            let lua = `add_app(${appId}, "${gameData.name}")\n`;
+            // 1. .LUA generálás
+            let lua = `-- SteamTools Master Unlocker\n-- Game: ${gameData.name}\n\nadd_app(${appId}, "${gameData.name}")\n`;
             if (gameData.dlc) gameData.dlc.forEach(id => lua += `add_dlc(${id})\n`);
             attachments.push(new AttachmentBuilder(Buffer.from(lua), { name: `unlock_${appId}.lua` }));
 
-            // Fixek feldolgozása (Letöltés vagy Link)
-            const targetFix = fixes.ryuu || fixes.online;
-            if (targetFix) {
-                const fixFile = await getFileAttachment(targetFix, `fix_${appId}.zip`);
-                if (fixFile && fixFile.attachment) {
-                    attachments.push(fixFile.attachment);
-                    fixInfo = "✅ **Fix fájl csatolva!**";
-                } else if (fixFile?.tooLarge) {
-                    fixInfo = `⚠️ **Fix túl nagy (${fixFile.size}MB)**: [Közvetlen letöltés](${targetFix})`;
+            // 2. Fix keresés és csatolás
+            if (fix.url) {
+                const fileData = await getFile(fix.url, fix.name);
+                if (fileData?.attachment) {
+                    attachments.push(fileData.attachment);
+                    fixStatus = `✅ **Fix fájl csatolva:** \`${fix.name}\``;
+                } else if (fileData?.tooLarge) {
+                    fixStatus = `⚠️ **Fix túl nagy (${fileData.size}MB)**, ezért csak linket küldök: [Letöltés](${fix.url})`;
                 } else {
-                    fixInfo = `🔗 **Fix link**: [Letöltés](${targetFix})`;
+                    fixStatus = `🔗 **Fix elérhető (Link):** [Letöltés](${fix.url})`;
                 }
             }
 
             const embed = new EmbedBuilder()
                 .setTitle(`📦 ${gameData.name}`)
                 .setThumbnail(gameData.header_image)
-                .setColor(0x00FF00)
+                .setColor(fix.url ? 0x00FF00 : 0x3498db)
                 .addFields(
                     { name: 'AppID', value: appId, inline: true },
-                    { name: 'Online Fix állapot', value: fixInfo || "❌ Nem található" }
-                );
+                    { name: 'Online Fix Állapot', value: fixStatus }
+                )
+                .setFooter({ text: "SteamTools Master | Források: Ryuu Fixes & Luatools" });
 
             await interaction.editReply({ embeds: [embed], files: attachments });
 
-        } catch (e) { await interaction.editReply("❌ Hiba történt."); }
+        } catch (e) {
+            console.error(e);
+            await interaction.editReply("❌ Hiba történt a generálás során.");
+        }
     }
 });
 
 client.once('ready', async () => {
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
     const commands = [
-        new SlashCommandBuilder().setName('manifest').setDescription('Online Fix és LUA')
-            .addStringOption(o => o.setName('jateknev').setDescription('Név...').setRequired(true).setAutocomplete(true))
+        new SlashCommandBuilder()
+            .setName('manifest')
+            .setDescription('Manifest, LUA és Online Fix kereső')
+            .addStringOption(o => o.setName('jateknev').setDescription('Kezdd el gépelni a játék nevét...').setRequired(true).setAutocomplete(true))
     ].map(c => c.toJSON());
-    await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: commands });
+
+    const clientId = process.env.CLIENT_ID || client.user.id;
+    await rest.put(Routes.applicationCommands(clientId), { body: commands });
+    console.log("✅ Bot online és Ryuu forrás frissítve!");
 });
 
 client.login(process.env.DISCORD_TOKEN);
