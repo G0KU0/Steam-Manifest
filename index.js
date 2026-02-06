@@ -14,12 +14,12 @@ const LIMITS = {
     3: Infinity  // Rang 3: Végtelen
 };
 
-// --- 2. WEBSZERVER (Renderhez) ---
+// --- 2. WEBSZERVER ---
 const app = express();
 app.get('/', (req, res) => res.send('SteamTools Master Bot Online!'));
 app.listen(process.env.PORT || 3000);
 
-// --- 3. ADATBÁZIS KAPCSOLÓDÁS ---
+// --- 3. ADATBÁZIS ---
 mongoose.connect(process.env.MONGODB_URI).catch(err => console.error("MongoDB hiba:", err));
 
 const UserSchema = new mongoose.Schema({
@@ -35,7 +35,7 @@ const ConfigSchema = new mongoose.Schema({
 });
 const ConfigModel = mongoose.model('Config', ConfigSchema);
 
-// --- 4. FORRÁSOK LISTÁJA ---
+// --- 4. FORRÁSOK ---
 const FIX_SOURCES = {
     online: "https://files.luatools.work/OnlineFix1/",
     ryuu_fixes: "https://generator.ryuu.lol/fixes"
@@ -94,8 +94,7 @@ async function getFile(url, fileName) {
         if (!head) return null;
         
         const size = parseInt(head.headers['content-length'] || 0);
-        // Szigorúbb előzetes ellenőrzés (50MB fölött meg se próbálja)
-        if (size > 50 * 1024 * 1024) return { tooLarge: true, size: (size / 1024 / 1024).toFixed(1) };
+        if (size > 24 * 1024 * 1024) return { tooLarge: true, size: (size / 1024 / 1024).toFixed(1) };
         
         const res = await axios.get(url, { responseType: 'arraybuffer', timeout: 15000 });
         return { attachment: new AttachmentBuilder(Buffer.from(res.data), { name: fileName }) };
@@ -207,11 +206,11 @@ client.on(Events.InteractionCreate, async interaction => {
             let attachments = [];
             let statusText = "";
 
-            // Manifest Kezelés
+            // --- 1. MANIFEST VIZSGÁLATA ---
             if (zip) {
-                // 48 MB felett biztosan link (Discord szerver boosttól függetlenül)
-                if (zip.data.length > 48 * 1024 * 1024) { 
-                    statusText += `⚠️ **Manifest:** Túl nagy -> [Letöltés](${zip.url})\n`;
+                if (zip.data.length > 24 * 1024 * 1024) {
+                    const sizeMB = (zip.data.length / 1024 / 1024).toFixed(1);
+                    statusText += `⚠️ **Manifest:** Túl nagy (${sizeMB} MB) -> [Letöltés](${zip.url})\n`;
                 } else {
                     attachments.push(new AttachmentBuilder(Buffer.from(zip.data), { name: `manifest_${appId}.zip` }));
                     statusText += `✅ **Manifest:** Fájl csatolva\n`;
@@ -220,20 +219,25 @@ client.on(Events.InteractionCreate, async interaction => {
                 statusText += `⚠️ **Manifest:** Nincs találat.\n`;
             }
 
-            // Fix Kezelés
+            // --- 2. ONLINE FIX VIZSGÁLATA ---
             if (fix.url) {
                 const fileData = await getFile(fix.url, fix.name);
+                
                 if (fileData?.attachment) {
                     attachments.push(fileData.attachment);
                     statusText += `✅ **Online Fix:** Fájl csatolva\n`;
+                } else if (fileData?.tooLarge) {
+                    statusText += `⚠️ **Online Fix:** Túl nagy (${fileData.size} MB) -> [Letöltés](${fix.url})\n`;
                 } else {
-                    statusText += `🔗 **Online Fix:** [Letöltés](${fix.url})`;
+                    statusText += `🔗 **Online Fix:** [Letöltés](${fix.url})\n`;
                 }
             }
 
+            // KVÓTA SZÁMÍTÁS
             quota.user.dailyUsage += 1;
             await quota.user.save();
             const remaining = LIMITS[quota.user.rank] === Infinity ? "∞" : LIMITS[quota.user.rank] - quota.user.dailyUsage;
+            const quotaText = `Használva: ${quota.user.dailyUsage} | Maradt: ${remaining}`;
 
             const embed = new EmbedBuilder()
                 .setTitle(`📦 ${gameData.name}`)
@@ -242,30 +246,28 @@ client.on(Events.InteractionCreate, async interaction => {
                 .addFields(
                     { name: 'AppID', value: appId, inline: true },
                     { name: 'Fájlok', value: statusText },
-                    { name: 'Napi Kvóta', value: `Használva: ${quota.user.dailyUsage} | Maradt: ${remaining}` }
+                    // ITT JELENIK MEG A KVÓTA
+                    { name: 'Napi Kvóta', value: quotaText }
                 )
                 .setFooter({ text: "SteamTools Master" });
 
             // --- FAIL-SAFE KÜLDÉS ---
             try {
-                // 1. Próbáljuk meg elküldeni a fájlokat
                 await interaction.editReply({ embeds: [embed], files: attachments });
             } catch (sendError) {
-                // 2. HA HIBA VAN (pl. túl nagy a fájl a barátod szerverén)
-                console.log("Feltöltési hiba, váltás linkre:", sendError.message);
+                console.log("Még mindig túl nagy az összméret, minden linkre vált.");
                 
-                // Átírjuk a szöveget linkesre és töröljük a fájlokat
                 let fallbackText = "";
                 if (zip) fallbackText += `🔗 **Manifest:** [LETÖLTÉS LINK](${zip.url})\n`;
                 if (fix.url) fallbackText += `🔗 **Online Fix:** [LETÖLTÉS LINK](${fix.url})\n`;
                 
                 const fallbackEmbed = new EmbedBuilder()
                     .setTitle(`📦 ${gameData.name} (Link Mód)`)
-                    .setDescription(`⚠️ **A Discord visszautasította a fájlt.**\n(Valószínűleg túl nagy a szervernek).\n\nHasználd a lenti linkeket:\n\n${fallbackText}`)
+                    .setDescription(`⚠️ **A csomag összmérete túl nagy volt.**\nKérlek töltsd le őket külön:\n\n${fallbackText}`)
+                    .addFields({ name: 'Napi Kvóta', value: quotaText }) // ITT IS MEGJELENIK
                     .setThumbnail(gameData.header_image)
                     .setColor(0xFFA500);
 
-                // Küldés újra, de most fájlok nélkül (files: [])
                 await interaction.editReply({ embeds: [fallbackEmbed], files: [] });
             }
 
