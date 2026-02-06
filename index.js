@@ -41,8 +41,12 @@ const client = new Client({
 async function fetchManifestZip(id) {
     for (const source of MANIFEST_SOURCES) {
         try {
-            const res = await axios({ method: 'get', url: source.url(id), responseType: 'arraybuffer', timeout: 3500 });
-            if (res.status === 200) return { data: res.data, source: source.name };
+            const url = source.url(id);
+            const res = await axios({ method: 'get', url: url, responseType: 'arraybuffer', timeout: 3500 });
+            if (res.status === 200) {
+                // Visszaadjuk az URL-t is, hogy linkelni tudjuk, ha túl nagy
+                return { data: res.data, source: source.name, url: url }; 
+            }
         } catch (e) { continue; }
     }
     return null;
@@ -84,11 +88,11 @@ async function findFixes(appid, gameName) {
 
 client.on(Events.InteractionCreate, async interaction => {
     
-    // --- AUTOCOMPLETE (Korlátozás nélkül) ---
+    // --- AUTOCOMPLETE ---
     if (interaction.isAutocomplete()) {
         const focused = interaction.options.getFocused();
         if (!focused) return interaction.respond([]);
-
+        
         const url = `https://store.steampowered.com/api/storesearch/?term=${encodeURIComponent(focused)}&l=hungarian&cc=HU`;
         const res = await axios.get(url).catch(() => ({ data: { items: [] } }));
         
@@ -120,22 +124,26 @@ client.on(Events.InteractionCreate, async interaction => {
             let attachments = [];
             let statusText = "";
 
-            // 1. MANIFEST ZIP (EZT KÜLDJÜK FÁJLKÉNT)
+            // 1. MANIFEST ZIP (Biztonsági ellenőrzéssel)
             if (zip) {
-                attachments.push(new AttachmentBuilder(Buffer.from(zip.data), { name: `manifest_${appId}.zip` }));
-                statusText += `✅ **Manifest:** Fájl csatolva (Forrás: ${zip.source})\n`;
+                // Itt ellenőrizzük a méretet! (24MB limit)
+                if (zip.data.length > 24 * 1024 * 1024) {
+                    statusText += `⚠️ **Manifest:** Túl nagy (${(zip.data.length / 1024 / 1024).toFixed(1)}MB) -> [Letöltés](${zip.url})\n`;
+                } else {
+                    attachments.push(new AttachmentBuilder(Buffer.from(zip.data), { name: `manifest_${appId}.zip` }));
+                    statusText += `✅ **Manifest:** Fájl csatolva (Forrás: ${zip.source})\n`;
+                }
             } else {
                 statusText += `⚠️ **Manifest:** Nem található a szervereken.\n`;
             }
 
-            // 2. LUA (CSAK INFÓ, NEM KÜLDJÜK)
-            // Itt csak generáljuk a szöveget, de nem adjuk hozzá az attachments tömbhöz
+            // 2. LUA (Csak infó)
             let dlcCount = (gameData.dlc) ? gameData.dlc.length : 0;
             if (includeDlc && dlcCount > 0) {
-                statusText += `ℹ️ **DLC:** ${dlcCount} db feloldása beállítva (LUA nem lett küldve).\n`;
+                statusText += `ℹ️ **DLC:** ${dlcCount} db feloldása (LUA generálva)\n`;
             }
 
-            // 3. ONLINE FIX (FÁJL VAGY LINK)
+            // 3. ONLINE FIX
             if (fix.url) {
                 const fileData = await getFile(fix.url, fix.name);
                 if (fileData?.attachment) {
@@ -158,13 +166,14 @@ client.on(Events.InteractionCreate, async interaction => {
                     { name: 'AppID', value: appId, inline: true },
                     { name: 'Fájlok állapota', value: statusText }
                 )
-                .setFooter({ text: "SteamTools Master - Manifest Mode" });
+                .setFooter({ text: "SteamTools Master - Safe Mode" });
 
             await interaction.editReply({ embeds: [embed], files: attachments });
 
         } catch (e) {
-            console.error(e);
-            await interaction.editReply("❌ Hiba történt.");
+            console.error(e); // A Render logban látni fogod, mi volt a baj
+            // Ha a Discord elutasítja a fájlt (413), akkor küldünk egy hibaüzenetet fájlok nélkül
+            await interaction.editReply({ content: "❌ Hiba történt (Valószínűleg túl nagy a fájl), próbáld újra később.", files: [] });
         }
     }
 });
