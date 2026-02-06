@@ -26,30 +26,43 @@ const FIX_SOURCES = {
 
 const MANIFEST_SOURCES = [
     { name: 'Morrenus', url: (id) => `https://manifest.morrenus.xyz/api/v1/manifest/${id}?api_key=${process.env.MORRENUS_API_KEY}` },
-    { name: 'Ryuu', url: (id) => `http://167.235.229.108/${id}` }
+    { name: 'Ryuu', url: (id) => `http://167.235.229.108/${id}` },
+    { name: 'Sushi', url: (id) => `https://raw.githubusercontent.com/sushi-dev55-alt/sushitools-games-repo-alt/refs/heads/main/${id}.zip` },
+    { name: 'TwentyTwo', url: (id) => `http://masss.pythonanywhere.com/storage?auth=IEOIJE54esfsipoE56GE4&appid=${id}` },
+    { name: 'ManifestHub', url: (id) => `https://codeload.github.com/SteamAutoCracks/ManifestHub/zip/refs/heads/${id}` }
 ];
 
 const client = new Client({ 
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages] 
+    intents: [
+        GatewayIntentBits.Guilds, 
+        GatewayIntentBits.GuildMessages, 
+        GatewayIntentBits.MessageContent
+    ] 
 });
 
 // --- SEGÉDFÜGGVÉNYEK ---
 
-// Fájl letöltése és csatolása (24MB limit)
+async function fetchManifestZip(id) {
+    for (const source of MANIFEST_SOURCES) {
+        try {
+            const res = await axios({ method: 'get', url: source.url(id), responseType: 'arraybuffer', timeout: 3500 });
+            if (res.status === 200) return { data: res.data, source: source.name };
+        } catch (e) { continue; }
+    }
+    return null;
+}
+
 async function getFile(url, fileName) {
     try {
         const head = await axios.head(url, { timeout: 2500 }).catch(() => null);
         if (!head) return null;
-
         const size = parseInt(head.headers['content-length'] || 0);
         if (size > 24 * 1024 * 1024) return { tooLarge: true, size: (size / 1024 / 1024).toFixed(1) };
-
         const res = await axios.get(url, { responseType: 'arraybuffer', timeout: 15000 });
         return { attachment: new AttachmentBuilder(Buffer.from(res.data), { name: fileName }) };
     } catch (e) { return null; }
 }
 
-// Fix keresés (Ryuu név alapján + Luatools AppID alapján)
 async function findFixes(appid, gameName) {
     if (gameName) {
         const clean = gameName.replace(/[:™®]/g, "");
@@ -59,52 +72,37 @@ async function findFixes(appid, gameName) {
             `${clean} Online.zip`, 
             `${clean}.zip`
         ];
-        
         for (const p of patterns) {
             const url = `${FIX_SOURCES.ryuu_fixes}/${encodeURIComponent(p)}`;
             const check = await axios.head(url).catch(() => null);
             if (check && check.status === 200) return { url, name: p };
         }
     }
-
     const onlineUrl = `${FIX_SOURCES.online}${appid}.zip`;
     const checkOnline = await axios.head(onlineUrl).catch(() => null);
     if (checkOnline && checkOnline.status === 200) return { url: onlineUrl, name: `OnlineFix_${appid}.zip` };
-    
     return { url: null, name: "" };
 }
 
 // --- ESEMÉNYEK ---
 
 client.on(Events.InteractionCreate, async interaction => {
-    // --- AUTOCOMPLETE (Visszaállítva a régi, gyors verzióra) ---
+    
+    // --- AUTOCOMPLETE (EZ AZ EREDETI KÓDOD, AMI JÓ VOLT) ---
     if (interaction.isAutocomplete()) {
         const focused = interaction.options.getFocused();
-        // Itt kivettem a limitet! Akár 1 betűre is keres.
-        if (!focused) return interaction.respond([]);
-
-        try {
-            const url = `https://store.steampowered.com/api/storesearch/?term=${encodeURIComponent(focused)}&l=hungarian&cc=HU`;
-            const res = await axios.get(url, { timeout: 2000 });
-            
-            const choices = res.data.items.map(g => ({ 
-                name: `${g.name.substring(0, 80)} (${g.id})`, 
-                value: g.id.toString() 
-            })).slice(0, 20);
-            
-            await interaction.respond(choices);
-        } catch (e) {
-            // Ha hiba van, csendben maradunk, nem fagyasztjuk le a botot
-            try { await interaction.respond([]); } catch (err) {}
-        }
-        return;
+        // Itt NINCS semmilyen korlátozás, egyből küldi a kérést a Steamnek
+        const url = `https://store.steampowered.com/api/storesearch/?term=${encodeURIComponent(focused)}&l=hungarian&cc=HU`;
+        const res = await axios.get(url).catch(() => ({ data: { items: [] } }));
+        const suggestions = res.data.items.map(g => ({ name: `${g.name.substring(0, 80)} (${g.id})`, value: g.id.toString() })).slice(0, 20);
+        return interaction.respond(suggestions);
     }
+    // -------------------------------------------------------
 
     if (!interaction.isChatInputCommand()) return;
 
     if (interaction.commandName === 'manifest') {
         const sub = interaction.options.getSubcommand();
-        // Ha 'id' parancs, akkor azt olvassuk, ha 'nev', akkor a jateknev mezőt
         const appId = sub === 'id' ? interaction.options.getString('appid') : interaction.options.getString('jateknev');
         const includeDlc = interaction.options.getBoolean('dlc') ?? true;
 
@@ -116,41 +114,53 @@ client.on(Events.InteractionCreate, async interaction => {
 
             const gameData = steamRes.data[appId].data;
             const fix = await findFixes(appId, gameData.name);
+            const zip = await fetchManifestZip(appId);
+            
             let attachments = [];
-            let fixStatus = "❌ Nem található";
+            let statusText = "";
 
             // LUA
             let lua = `-- SteamTools Master Unlocker\nadd_app(${appId}, "${gameData.name}")\n`;
             if (gameData.dlc) gameData.dlc.forEach(id => lua += `add_dlc(${id})\n`);
             attachments.push(new AttachmentBuilder(Buffer.from(lua), { name: `unlock_${appId}.lua` }));
 
-            // Fix (Fájl vagy Link)
+            // Manifest
+            if (zip) {
+                attachments.push(new AttachmentBuilder(Buffer.from(zip.data), { name: `manifest_${appId}.zip` }));
+                statusText += `✅ **Manifest:** ${zip.source}\n`;
+            } else {
+                statusText += `⚠️ **Manifest:** Nincs találat\n`;
+            }
+
+            // Fix
             if (fix.url) {
                 const fileData = await getFile(fix.url, fix.name);
                 if (fileData?.attachment) {
                     attachments.push(fileData.attachment);
-                    fixStatus = `✅ **Fájl csatolva:** \`${fix.name}\``;
+                    statusText += `✅ **Fix:** Fájl csatolva (\`${fix.name}\`)`;
                 } else if (fileData?.tooLarge) {
-                    fixStatus = `⚠️ **Túl nagy (${fileData.size}MB):** [Közvetlen letöltés](${fix.url})`;
+                    statusText += `⚠️ **Fix:** Túl nagy -> [Letöltés](${fix.url})`;
                 } else {
-                    fixStatus = `🔗 **Link:** [Letöltés](${fix.url})`;
+                    statusText += `🔗 **Fix:** [Letöltés](${fix.url})`;
                 }
+            } else {
+                statusText += `❌ **Fix:** Nincs javítás`;
             }
 
             const embed = new EmbedBuilder()
                 .setTitle(`📦 ${gameData.name}`)
                 .setThumbnail(gameData.header_image)
-                .setColor(fix.url ? 0x00FF00 : 0x3498db)
+                .setColor(zip ? 0x00FF00 : 0xFFA500)
                 .addFields(
                     { name: 'AppID', value: appId, inline: true },
-                    { name: 'Online Fix', value: fixStatus }
+                    { name: 'Info', value: statusText }
                 )
-                .setFooter({ text: "SteamTools Master - Ryuu & Online Fix" });
+                .setFooter({ text: "SteamTools Master" });
 
             await interaction.editReply({ embeds: [embed], files: attachments });
 
         } catch (e) {
-            await interaction.editReply("❌ Hiba történt a generálás során.");
+            await interaction.editReply("❌ Hiba történt.");
         }
     }
 });
@@ -161,7 +171,6 @@ client.once('ready', async () => {
         new SlashCommandBuilder()
             .setName('manifest')
             .setDescription('Manifest és Online Fix kereső')
-            // VISSZAÁLLÍTVA: Subcommand rendszer (id / nev)
             .addSubcommand(sub => 
                 sub.setName('id')
                     .setDescription('Generálás AppID alapján')
@@ -169,14 +178,14 @@ client.once('ready', async () => {
                     .addBooleanOption(o => o.setName('dlc').setDescription('DLC-k feloldása?')))
             .addSubcommand(sub => 
                 sub.setName('nev')
-                    .setDescription('Keresés név alapján (Autocomplete)')
+                    .setDescription('Keresés név alapján')
                     .addStringOption(o => o.setName('jateknev').setDescription('Kezdd el gépelni a játék nevét').setRequired(true).setAutocomplete(true))
                     .addBooleanOption(o => o.setName('dlc').setDescription('DLC-k feloldása?')))
     ].map(c => c.toJSON());
 
     const clientId = process.env.CLIENT_ID || client.user.id;
     await rest.put(Routes.applicationCommands(clientId), { body: commands });
-    console.log(`✅ Bot online: ${client.user.tag} - Parancsok visszaállítva!`);
+    console.log(`✅ Bot online: ${client.user.tag}`);
 });
 
 client.login(process.env.DISCORD_TOKEN);
