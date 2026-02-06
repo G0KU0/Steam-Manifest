@@ -84,7 +84,7 @@ async function findFixes(appid, gameName) {
 
 client.on(Events.InteractionCreate, async interaction => {
     
-    // --- AUTOCOMPLETE (Maradt a jól működő verzió) ---
+    // --- AUTOCOMPLETE (Korlátozás nélkül) ---
     if (interaction.isAutocomplete()) {
         const focused = interaction.options.getFocused();
         if (!focused) return interaction.respond([]);
@@ -120,48 +120,45 @@ client.on(Events.InteractionCreate, async interaction => {
             let attachments = [];
             let statusText = "";
 
-            // --- 1. CSAK EZT A FÁJLT KÜLDJÜK (Ami mindent tud) ---
-            let lua = `-- SteamTools Master Unlocker\n-- Game: ${gameData.name}\n\nadd_app(${appId}, "${gameData.name}")\n`;
-            if (gameData.dlc && includeDlc) {
-                gameData.dlc.forEach(id => lua += `add_dlc(${id})\n`);
-                statusText += `✅ **DLC-k:** ${gameData.dlc.length} db hozzáadva a fájlhoz!\n`;
-            } else {
-                statusText += `ℹ️ **DLC:** Nincs DLC vagy ki lett kapcsolva.\n`;
-            }
-            // Itt adjuk hozzá az EGYETLEN fontos fájlt
-            attachments.push(new AttachmentBuilder(Buffer.from(lua), { name: `unlock_${appId}.lua` }));
-
-            // --- 2. MANIFEST (Csak infó, fájlt NEM küldünk) ---
+            // 1. MANIFEST ZIP (EZT KÜLDJÜK FÁJLKÉNT)
             if (zip) {
-                // KIVETTEM: attachments.push(...) -> Nem küldi el a ZIP-et, hogy ne zavarjon
-                statusText += `✅ **Manifest:** Elérhető a szerveren (${zip.source}), de a LUA elég a feloldáshoz.\n`;
+                attachments.push(new AttachmentBuilder(Buffer.from(zip.data), { name: `manifest_${appId}.zip` }));
+                statusText += `✅ **Manifest:** Fájl csatolva (Forrás: ${zip.source})\n`;
             } else {
-                statusText += `⚠️ **Manifest:** Nem található külön fájlként.\n`;
+                statusText += `⚠️ **Manifest:** Nem található a szervereken.\n`;
             }
 
-            // --- 3. FIX (Csak ha van, és fontos) ---
+            // 2. LUA (CSAK INFÓ, NEM KÜLDJÜK)
+            // Itt csak generáljuk a szöveget, de nem adjuk hozzá az attachments tömbhöz
+            let dlcCount = (gameData.dlc) ? gameData.dlc.length : 0;
+            if (includeDlc && dlcCount > 0) {
+                statusText += `ℹ️ **DLC:** ${dlcCount} db feloldása beállítva (LUA nem lett küldve).\n`;
+            }
+
+            // 3. ONLINE FIX (FÁJL VAGY LINK)
             if (fix.url) {
                 const fileData = await getFile(fix.url, fix.name);
                 if (fileData?.attachment) {
                     attachments.push(fileData.attachment);
-                    statusText += `✅ **Online Fix:** Mellékelve (\`${fix.name}\`)`;
+                    statusText += `✅ **Online Fix:** Fájl csatolva (\`${fix.name}\`)`;
                 } else if (fileData?.tooLarge) {
                     statusText += `⚠️ **Online Fix:** Túl nagy -> [Letöltés](${fix.url})`;
                 } else {
                     statusText += `🔗 **Online Fix:** [Letöltés](${fix.url})`;
                 }
+            } else {
+                statusText += `❌ **Online Fix:** Nincs javítás`;
             }
 
             const embed = new EmbedBuilder()
                 .setTitle(`📦 ${gameData.name}`)
                 .setThumbnail(gameData.header_image)
-                .setColor(0x00FF00)
-                .setDescription(`**Letöltötted az "All-in-One" feloldó fájlt!**\nEbben benne van az alapjáték és az összes DLC kódja is.`)
+                .setColor(zip ? 0x00FF00 : 0xFFA500)
                 .addFields(
                     { name: 'AppID', value: appId, inline: true },
-                    { name: 'Részletek', value: statusText }
+                    { name: 'Fájlok állapota', value: statusText }
                 )
-                .setFooter({ text: "Húzd a .lua fájlt a SteamTools-ra!" });
+                .setFooter({ text: "SteamTools Master - Manifest Mode" });
 
             await interaction.editReply({ embeds: [embed], files: attachments });
 
@@ -177,7 +174,7 @@ client.once('ready', async () => {
     const commands = [
         new SlashCommandBuilder()
             .setName('manifest')
-            .setDescription('All-in-One feloldó generálása')
+            .setDescription('Manifest ZIP és Online Fix letöltő')
             .addSubcommand(sub => 
                 sub.setName('id')
                     .setDescription('Generálás AppID alapján')
