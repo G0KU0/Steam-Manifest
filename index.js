@@ -14,7 +14,7 @@ const LIMITS = {
     3: Infinity  // Rang 3
 };
 
-// --- 2. WEBSZERVER (Renderhez) ---
+// --- 2. WEBSZERVER ---
 const app = express();
 app.get('/', (req, res) => res.send('SteamTools Master Bot Online!'));
 app.listen(process.env.PORT || 3000);
@@ -30,8 +30,10 @@ const UserSchema = new mongoose.Schema({
 });
 const UserModel = mongoose.model('User', UserSchema);
 
+// ÚJ: logChannelId hozzáadva a beállításokhoz
 const ConfigSchema = new mongoose.Schema({
-    allowedChannels: [String]
+    allowedChannels: [String],
+    logChannelId: { type: String, default: null } 
 });
 const ConfigModel = mongoose.model('Config', ConfigSchema);
 
@@ -95,7 +97,7 @@ async function getFile(url, fileName) {
         
         const size = parseInt(head.headers['content-length'] || 0);
         
-        // 10 MB LIMIT (Szigorú)
+        // 10 MB LIMIT
         if (size > 10 * 1024 * 1024) return { tooLarge: true, size: (size / 1024 / 1024).toFixed(1) };
         
         const res = await axios.get(url, { responseType: 'arraybuffer', timeout: 15000 });
@@ -134,7 +136,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (!interaction.isChatInputCommand()) return;
 
-    // ADMIN PARANCSOK
+    // --- ADMIN PARANCSOK ---
     if (interaction.commandName === 'admin') {
         if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator) && interaction.user.id !== process.env.ADMIN_ID) {
             return interaction.reply({ content: "❌ Nincs jogosultságod!", ephemeral: true });
@@ -142,38 +144,59 @@ client.on(Events.InteractionCreate, async interaction => {
         const group = interaction.options.getSubcommandGroup();
         const sub = interaction.options.getSubcommand();
         
+        // --- FELHASZNÁLÓK ---
         if (group === 'user') {
             const target = interaction.options.getUser('target');
+            
+            // Hozzáadás
             if (sub === 'add') {
                 const rank = interaction.options.getInteger('rank');
                 await UserModel.findOneAndUpdate({ userId: target.id }, { userId: target.id, rank: rank }, { upsert: true, new: true });
-                return interaction.reply({ content: `✅ **${target.tag}** rangja: **${rank}** (Limit: ${LIMITS[rank]})`, ephemeral: true });
+                return interaction.reply({ content: `✅ **${target.tag}** hozzáadva! Rang: **${rank}**`, ephemeral: true });
             }
+            // Törlés
             if (sub === 'remove') {
                 await UserModel.findOneAndDelete({ userId: target.id });
                 return interaction.reply({ content: `🗑️ **${target.tag}** törölve.`, ephemeral: true });
             }
+            // ÚJ: RESET (Nullázás)
+            if (sub === 'reset') {
+                const user = await UserModel.findOneAndUpdate({ userId: target.id }, { dailyUsage: 0 }, { new: true });
+                if (!user) return interaction.reply({ content: "❌ Ez a felhasználó nincs az adatbázisban.", ephemeral: true });
+                return interaction.reply({ content: `🔄 **${target.tag}** napi kvótája lenullázva! (0 használat)`, ephemeral: true });
+            }
         }
+
+        // --- CSATORNÁK ---
         if (group === 'channel') {
             const targetChannel = interaction.options.getChannel('target') || interaction.channel;
             let config = await ConfigModel.findOne() || await ConfigModel.create({ allowedChannels: [] });
+            
+            // Engedélyezés (Whitelist)
             if (sub === 'add') {
                 if (!config.allowedChannels.includes(targetChannel.id)) {
                     config.allowedChannels.push(targetChannel.id);
                     await config.save();
-                    return interaction.reply({ content: `✅ Csatorna engedélyezve: ${targetChannel}`, ephemeral: true });
+                    return interaction.reply({ content: `✅ Csatorna engedélyezve (használat): ${targetChannel}`, ephemeral: true });
                 }
                 return interaction.reply({ content: `⚠️ Már engedélyezve van.`, ephemeral: true });
             }
+            // Tiltás
             if (sub === 'remove') {
                 config.allowedChannels = config.allowedChannels.filter(id => id !== targetChannel.id);
                 await config.save();
                 return interaction.reply({ content: `🚫 Csatorna tiltva.`, ephemeral: true });
             }
+            // ÚJ: LOG CSATORNA BEÁLLÍTÁS
+            if (sub === 'setlog') {
+                config.logChannelId = targetChannel.id;
+                await config.save();
+                return interaction.reply({ content: `📜 **Log Csatorna beállítva:** ${targetChannel}\nIde fogja küldeni a bot, hogy ki mit töltött le.`, ephemeral: true });
+            }
         }
     }
 
-    // MANIFEST PARANCS
+    // --- MANIFEST PARANCS ---
     if (interaction.commandName === 'manifest') {
         const sub = interaction.options.getSubcommand();
         const appId = sub === 'id' ? interaction.options.getString('appid') : interaction.options.getString('jateknev');
@@ -262,6 +285,30 @@ client.on(Events.InteractionCreate, async interaction => {
                 await interaction.editReply({ embeds: [fallbackEmbed], files: [] });
             }
 
+            // --- 4. LOG KÜLDÉSE A KÜLÖN CSATORNÁBA (HA BE VAN ÁLLÍTVA) ---
+            if (config && config.logChannelId) {
+                try {
+                    const logChannel = await client.channels.fetch(config.logChannelId);
+                    if (logChannel) {
+                        const logEmbed = new EmbedBuilder()
+                            .setTitle("📜 Játék Lekérés")
+                            .setColor(0x3498db)
+                            .setThumbnail(gameData.header_image)
+                            .addFields(
+                                { name: 'Felhasználó', value: `${interaction.user} (${interaction.user.tag})`, inline: true },
+                                { name: 'Játék', value: `${gameData.name}`, inline: true },
+                                { name: 'AppID', value: `${appId}`, inline: true },
+                                { name: 'Kvóta', value: `${quota.user.dailyUsage} db ma`, inline: true }
+                            )
+                            .setTimestamp();
+                        await logChannel.send({ embeds: [logEmbed] });
+                    }
+                } catch (err) {
+                    console.error("Nem sikerült a log küldése:", err.message);
+                }
+            }
+            // -------------------------------------------------------------
+
         } catch (e) {
             console.error(e);
             await interaction.editReply({ content: "❌ Váratlan hiba történt.", files: [] });
@@ -282,10 +329,17 @@ client.once('ready', async () => {
             .setName('admin')
             .setDescription('Bot kezelése')
             .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-            .addSubcommandGroup(group => group.setName('user').setDescription('Felhasználók').addSubcommand(sub => sub.setName('add').setDescription('Hozzáadás').addUserOption(o => o.setName('target').setDescription('Felhasználó').setRequired(true)).addIntegerOption(o => o.setName('rank').setDescription('Rang').setRequired(true).addChoices({ name: 'Rang 1', value: 1 }, { name: 'Rang 2', value: 2 }, { name: 'Rang 3', value: 3 }))).addSubcommand(sub => sub.setName('remove').setDescription('Törlés').addUserOption(o => o.setName('target').setDescription('Felhasználó').setRequired(true))))
-            .addSubcommandGroup(group => group.setName('channel').setDescription('Csatornák').addSubcommand(sub => sub.setName('add').setDescription('Engedélyezés').addChannelOption(o => o.setName('target').setDescription('Csatorna'))).addSubcommand(sub => sub.setName('remove').setDescription('Tiltás').addChannelOption(o => o.setName('target').setDescription('Csatorna'))))
+            .addSubcommandGroup(group => group.setName('user').setDescription('Felhasználók')
+                .addSubcommand(sub => sub.setName('add').setDescription('Hozzáadás').addUserOption(o => o.setName('target').setDescription('Felhasználó').setRequired(true)).addIntegerOption(o => o.setName('rank').setDescription('Rang').setRequired(true).addChoices({ name: 'Rang 1', value: 1 }, { name: 'Rang 2', value: 2 }, { name: 'Rang 3', value: 3 })))
+                .addSubcommand(sub => sub.setName('remove').setDescription('Törlés').addUserOption(o => o.setName('target').setDescription('Felhasználó').setRequired(true)))
+                // ÚJ PARANCS: RESET
+                .addSubcommand(sub => sub.setName('reset').setDescription('Kvóta nullázása').addUserOption(o => o.setName('target').setDescription('Felhasználó').setRequired(true))))
+            .addSubcommandGroup(group => group.setName('channel').setDescription('Csatornák')
+                .addSubcommand(sub => sub.setName('add').setDescription('Engedélyezés (Whitelist)').addChannelOption(o => o.setName('target').setDescription('Csatorna')))
+                .addSubcommand(sub => sub.setName('remove').setDescription('Tiltás').addChannelOption(o => o.setName('target').setDescription('Csatorna')))
+                // ÚJ PARANCS: SETLOG
+                .addSubcommand(sub => sub.setName('setlog').setDescription('Log csatorna beállítása').addChannelOption(o => o.setName('target').setDescription('A log csatorna').setRequired(true))))
     ].map(c => c.toJSON());
-
     const clientId = process.env.CLIENT_ID || client.user.id;
     await rest.put(Routes.applicationCommands(clientId), { body: commands });
     console.log(`✅ Bot online: ${client.user.tag}`);
