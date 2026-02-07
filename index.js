@@ -37,16 +37,16 @@ const ConfigSchema = new mongoose.Schema({
 const ConfigModel = mongoose.model('Config', ConfigSchema);
 
 // --- 4. FORRÁSOK ---
-const FIX_SOURCES = {
-    online: "https://files.luatools.work/OnlineFix1/",
-    ryuu_fixes: "https://generator.ryuu.lol/fixes"
+const API_URLS = {
+    ryuu_list: "https://generator.ryuu.lol/api/fixes", // Innen szedi a listát
+    ryuu_download: "https://generator.ryuu.lol/fixes/",
+    online_fix: "https://files.luatools.work/OnlineFix1/"
 };
 
 const MANIFEST_SOURCES = [
     { name: 'Morrenus', url: (id) => `https://manifest.morrenus.xyz/api/v1/manifest/${id}?api_key=${process.env.MORRENUS_API_KEY}` },
     { name: 'Ryuu', url: (id) => `http://167.235.229.108/${id}` },
     { name: 'Sushi', url: (id) => `https://raw.githubusercontent.com/sushi-dev55-alt/sushitools-games-repo-alt/refs/heads/main/${id}.zip` },
-    { name: 'TwentyTwo', url: (id) => `http://masss.pythonanywhere.com/storage?auth=IEOIJE54esfsipoE56GE4&appid=${id}` },
     { name: 'ManifestHub', url: (id) => `https://codeload.github.com/SteamAutoCracks/ManifestHub/zip/refs/heads/${id}` }
 ];
 
@@ -104,47 +104,55 @@ async function getFile(url, fileName) {
     } catch (e) { return null; }
 }
 
-// --- ÚJ "INTELLIGENS" KERESŐ ---
+// --- ÚJ: API ALAPÚ KERESŐ (Ez olvassa az oldal "agyát") ---
 async function findFixes(appid, gameName) {
     let foundFiles = [];
 
-    // 1. Ryuu Keresés - Minden variációt megnéz
-    if (gameName) {
-        // Tiszta név (kettőspontok nélkül)
-        const clean = gameName.replace(/[:™®]/g, ""); 
-        
-        // ITT VAN A JAVÍTÁS:
-        // A sima ".zip"-et alapból Online Fix-nek nevezzük el, mert a Ryuu oldalon 
-        // az esetek 99%-ában a sima nevű fájl az "Online/Tested" verzió.
-        const candidates = [
-            { suffix: '.zip', label: '🌐 Online Fix / Alap' },         // Sima név -> Online Fix
-            { suffix: ' Bypass.zip', label: '🛡️ Bypass' },              // Bypass -> Bypass
-            { suffix: ' Online Fix.zip', label: '🌐 Online Fix' },      // Explicit Online Fix
-            { suffix: ' Fix.zip', label: '🔧 Fix' },                   // Sima Fix
-            { suffix: ' Online.zip', label: '🌐 Online' },              // Online
-            { suffix: ' Online Patch - Tested OK.zip', label: '✅ Tested Online' } // Régi Tested
-        ];
+    // 1. Ryuu API lekérdezése (A teljes lista)
+    try {
+        const response = await axios.get(API_URLS.ryuu_list, { timeout: 3000 });
+        const allFixes = response.data; // Ez a JSON lista az oldalról
 
-        for (const candidate of candidates) {
-            const fileName = `${clean}${candidate.suffix}`;
-            const url = `${FIX_SOURCES.ryuu_fixes}/${encodeURIComponent(fileName)}`;
-            
-            try {
-                // Csak lecsekkoljuk, hogy létezik-e (HEAD)
-                const check = await axios.head(url, { timeout: 1200 }).catch(() => null);
-                if (check && check.status === 200) {
-                    foundFiles.push({ 
-                        url: url, 
-                        name: fileName, 
-                        type: candidate.label // Itt kapja meg a szép nevet
+        // Szűrés a játék nevére
+        // (Azonosítjuk a játékot a neve alapján)
+        if (gameName && Array.isArray(allFixes)) {
+            const searchName = gameName.toLowerCase().replace(/[^a-z0-9]/g, ""); // Tisztított keresőnév
+
+            // Végigmegyünk a listán
+            allFixes.forEach(item => {
+                // Az elem neve a listában (pl. "7 Days to Die")
+                const itemNameClean = item.name.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+                // Ha egyezik a név, vagy nagyon hasonlít
+                if (itemNameClean.includes(searchName) || searchName.includes(itemNameClean)) {
+                    // MEGTALÁLTUK!
+                    // Az index.html alapján ezek az adatok vannak benne:
+                    // item.name = Játék neve
+                    // item.file = Fájlnév (pl. "7 Days to Die.zip")
+                    // item.type = Típus (pl. "Online", "Bypass", "Fix")
+                    // item.status = Állapot (pl. "Tested", "Unstable")
+
+                    const downloadUrl = `${API_URLS.ryuu_download}${encodeURIComponent(item.file)}`;
+                    
+                    // Szép címke készítése (pl. "Tested Online" vagy "Unstable Bypass")
+                    let label = "🔧 Fix";
+                    if (item.type) label = item.type; // pl. "Online"
+                    if (item.status) label = `${item.status} ${label}`; // pl. "Tested Online"
+
+                    foundFiles.push({
+                        url: downloadUrl,
+                        name: item.file,
+                        type: label.toUpperCase() // Csupa nagybetűvel, ahogy kérted
                     });
                 }
-            } catch (e) { continue; }
+            });
         }
+    } catch (e) {
+        console.error("Ryuu API hiba:", e.message);
     }
 
-    // 2. Luatools Keresés (Biztonsági tartalék)
-    const onlineUrl = `${FIX_SOURCES.online}${appid}.zip`;
+    // 2. Luatools (Online Fix) hozzáadása tartaléknak
+    const onlineUrl = `${API_URLS.online_fix}${appid}.zip`;
     try {
         const checkOnline = await axios.head(onlineUrl, { timeout: 1500 }).catch(() => null);
         if (checkOnline && checkOnline.status === 200) {
@@ -152,13 +160,13 @@ async function findFixes(appid, gameName) {
                 foundFiles.push({ 
                     url: onlineUrl, 
                     name: `OnlineFix_${appid}.zip`, 
-                    type: '🌐 Luatools Fix' 
+                    type: '🌐 LUATOOLS ONLINE' 
                 });
             }
         }
     } catch(e) {}
     
-    return foundFiles; // Visszaadja az összes talált fájlt
+    return foundFiles;
 }
 
 // --- 6. ESEMÉNYEK ---
@@ -246,14 +254,14 @@ client.on(Events.InteractionCreate, async interaction => {
             const gameData = steamRes.data[appId].data;
             console.log(`[KERESÉS] ${interaction.user.tag} -> ${gameData.name}`);
 
-            // --- KERESÉS INDÍTÁSA ---
+            // --- KERESÉS INDÍTÁSA (API ALAPÚ) ---
             const foundFixes = await findFixes(appId, gameData.name);
             const zip = await fetchManifestZip(appId);
             
             let attachments = [];
             let statusText = "";
 
-            // 1. MANIFEST (10MB LIMIT)
+            // 1. MANIFEST
             if (zip) {
                 if (zip.data.length > 10 * 1024 * 1024) { 
                     const sizeMB = (zip.data.length / 1024 / 1024).toFixed(1);
@@ -266,16 +274,16 @@ client.on(Events.InteractionCreate, async interaction => {
                 statusText += `⚠️ **Manifest:** Nincs találat.\n`;
             }
 
-            // 2. MINDEN TALÁLT FÁJL (Online Fix + Bypass)
+            // 2. TALÁLATOK LISTÁZÁSA (A weboldal típusai alapján!)
             if (foundFixes.length > 0) {
-                statusText += `\n**🛠️ Talált Javítások (${foundFixes.length} db):**\n`;
+                statusText += `\n**🛠️ Talált Fájlok (${foundFixes.length} db):**\n`;
                 
                 for (const fix of foundFixes) {
                     const fileData = await getFile(fix.url, fix.name);
                     
                     if (fileData?.attachment) {
                         attachments.push(fileData.attachment);
-                        // Itt használjuk a "szép" nevet (fix.type)
+                        // Itt írja ki pl. "TESTED ONLINE" vagy "BYPASS"
                         statusText += `✅ **${fix.type}:** Fájl csatolva\n`;
                     } else if (fileData?.tooLarge) {
                         statusText += `⚠️ **${fix.type}:** Túl nagy (${fileData.size} MB) -> [Letöltés](${fix.url})\n`;
@@ -284,7 +292,7 @@ client.on(Events.InteractionCreate, async interaction => {
                     }
                 }
             } else {
-                statusText += `❌ **Javítás:** Nem található fájl a szerveren.\n`;
+                statusText += `❌ **Javítás:** Nem található a szerver listájában.\n`;
             }
 
             // KVÓTA
@@ -312,7 +320,6 @@ client.on(Events.InteractionCreate, async interaction => {
                 
                 let fallbackText = "";
                 if (zip) fallbackText += `🔗 **Manifest:** [LETÖLTÉS LINK](${zip.url})\n`;
-                // Listázzuk az összes linket
                 for (const fix of foundFixes) {
                     fallbackText += `🔗 **${fix.type}:** [LETÖLTÉS LINK](${fix.url})\n`;
                 }
@@ -327,7 +334,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 await interaction.editReply({ embeds: [fallbackEmbed], files: [] });
             }
 
-            // 4. LOGOLÁS
+            // 4. LOG
             if (config && config.logChannelId) {
                 try {
                     const logChannel = await client.channels.fetch(config.logChannelId);
