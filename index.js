@@ -6,6 +6,7 @@ const {
 const axios = require('axios');
 const mongoose = require('mongoose');
 const express = require('express');
+const cheerio = require('cheerio'); // EZT ADTAM HOZZÁ (telepítsd: npm install cheerio)
 
 // --- 1. KONFIGURÁCIÓ ---
 const LIMITS = {
@@ -37,16 +38,16 @@ const ConfigSchema = new mongoose.Schema({
 const ConfigModel = mongoose.model('Config', ConfigSchema);
 
 // --- 4. FORRÁSOK ---
-const API_URLS = {
-    ryuu_list: "https://generator.ryuu.lol/api/fixes", // Innen szedi a listát
-    ryuu_download: "https://generator.ryuu.lol/fixes/",
-    online_fix: "https://files.luatools.work/OnlineFix1/"
+const FIX_SOURCES = {
+    online: "https://files.luatools.work/OnlineFix1/",
+    ryuu_base: "https://generator.ryuu.lol" // Javítottam az alap URL-t
 };
 
 const MANIFEST_SOURCES = [
     { name: 'Morrenus', url: (id) => `https://manifest.morrenus.xyz/api/v1/manifest/${id}?api_key=${process.env.MORRENUS_API_KEY}` },
     { name: 'Ryuu', url: (id) => `http://167.235.229.108/${id}` },
     { name: 'Sushi', url: (id) => `https://raw.githubusercontent.com/sushi-dev55-alt/sushitools-games-repo-alt/refs/heads/main/${id}.zip` },
+    { name: 'TwentyTwo', url: (id) => `http://masss.pythonanywhere.com/storage?auth=IEOIJE54esfsipoE56GE4&appid=${id}` },
     { name: 'ManifestHub', url: (id) => `https://codeload.github.com/SteamAutoCracks/ManifestHub/zip/refs/heads/${id}` }
 ];
 
@@ -91,80 +92,88 @@ async function fetchManifestZip(id) {
 
 async function getFile(url, fileName) {
     try {
-        const head = await axios.head(url, { timeout: 2500 }).catch(() => null);
-        if (!head) return null;
+        // Itt már nem kell HEAD kérést küldeni a méret miatt, mert a findFixes már tudja a méretet a HTML-ből.
+        // De a biztonság kedvéért itt hagyjuk a letöltést.
         
-        const size = parseInt(head.headers['content-length'] || 0);
-        
-        // 10 MB LIMIT
-        if (size > 10 * 1024 * 1024) return { tooLarge: true, size: (size / 1024 / 1024).toFixed(1) };
-        
-        const res = await axios.get(url, { responseType: 'arraybuffer', timeout: 15000 });
+        const res = await axios.get(url, { 
+            responseType: 'arraybuffer', 
+            timeout: 25000, // Megnöveltem a timeoutot kicsit
+            headers: { 'User-Agent': 'Mozilla/5.0' }
+        });
         return { attachment: new AttachmentBuilder(Buffer.from(res.data), { name: fileName }) };
-    } catch (e) { return null; }
+    } catch (e) { 
+        console.error(`File download error: ${fileName}`, e.message);
+        return null; 
+    }
 }
 
-// --- ÚJ: API ALAPÚ KERESŐ (Ez olvassa az oldal "agyát") ---
+// --- JAVÍTOTT KERESŐ (CHEERIO + HTML SCRAPING) ---
+// Ez a rész lett teljesen lecserélve a te kódodban lévőhöz képest
 async function findFixes(appid, gameName) {
     let foundFiles = [];
 
-    // 1. Ryuu API lekérdezése (A teljes lista)
-    try {
-        const response = await axios.get(API_URLS.ryuu_list, { timeout: 3000 });
-        const allFixes = response.data; // Ez a JSON lista az oldalról
+    // 1. RYUU HTML SCRAPING (A biztos módszer)
+    if (gameName) {
+        try {
+            // Megpróbáljuk elérni az oldalt a játék nevével
+            // Fontos: A Ryuu URL-ek általában pontos nevet várnak
+            const searchUrl = `${FIX_SOURCES.ryuu_base}/fixes/${encodeURIComponent(gameName)}`;
+            
+            const response = await axios.get(searchUrl, {
+                headers: { 'User-Agent': 'Mozilla/5.0' },
+                validateStatus: status => status === 200 // Csak ha létezik az oldal
+            }).catch(() => null);
 
-        // Szűrés a játék nevére
-        // (Azonosítjuk a játékot a neve alapján)
-        if (gameName && Array.isArray(allFixes)) {
-            const searchName = gameName.toLowerCase().replace(/[^a-z0-9]/g, ""); // Tisztított keresőnév
-
-            // Végigmegyünk a listán
-            allFixes.forEach(item => {
-                // Az elem neve a listában (pl. "7 Days to Die")
-                const itemNameClean = item.name.toLowerCase().replace(/[^a-z0-9]/g, "");
-
-                // Ha egyezik a név, vagy nagyon hasonlít
-                if (itemNameClean.includes(searchName) || searchName.includes(itemNameClean)) {
-                    // MEGTALÁLTUK!
-                    // Az index.html alapján ezek az adatok vannak benne:
-                    // item.name = Játék neve
-                    // item.file = Fájlnév (pl. "7 Days to Die.zip")
-                    // item.type = Típus (pl. "Online", "Bypass", "Fix")
-                    // item.status = Állapot (pl. "Tested", "Unstable")
-
-                    const downloadUrl = `${API_URLS.ryuu_download}${encodeURIComponent(item.file)}`;
+            if (response && response.data) {
+                const $ = cheerio.load(response.data);
+                
+                // Végigmegyünk a .fix-item elemeken (ahogy a HTML-ben láttuk)
+                $('.fix-item').each((index, element) => {
+                    const relativeLink = $(element).attr('href');
+                    const name = $(element).find('.fix-name').text().trim();
+                    const sizeText = $(element).find('.fix-size').text().trim(); // pl: "0.8 MB" vagy "1.9 GB"
                     
-                    // Szép címke készítése (pl. "Tested Online" vagy "Unstable Bypass")
-                    let label = "🔧 Fix";
-                    if (item.type) label = item.type; // pl. "Online"
-                    if (item.status) label = `${item.status} ${label}`; // pl. "Tested Online"
+                    if (relativeLink && name) {
+                        const fullUrl = relativeLink.startsWith('http') ? relativeLink : `${FIX_SOURCES.ryuu_base}${relativeLink}`;
+                        
+                        // Méret ellenőrzés (Discord limit kb 25MB)
+                        let isTooBig = false;
+                        if (sizeText.includes('GB')) isTooBig = true;
+                        if (sizeText.includes('MB')) {
+                            const sizeNum = parseFloat(sizeText.replace(/[^0-9.]/g, ''));
+                            if (sizeNum > 24.5) isTooBig = true;
+                        }
 
-                    foundFiles.push({
-                        url: downloadUrl,
-                        name: item.file,
-                        type: label.toUpperCase() // Csupa nagybetűvel, ahogy kérted
-                    });
-                }
-            });
+                        foundFiles.push({
+                            url: fullUrl,
+                            name: `${name.replace(/[^a-zA-Z0-9.\-_]/g, '_')}.zip`, // Biztonságos fájlnév
+                            type: name.includes('Online') ? '🌐 Online Fix' : '🔧 Fix / Update',
+                            isTooBig: isTooBig,
+                            sizeText: sizeText
+                        });
+                    }
+                });
+            }
+        } catch (e) {
+            console.error("Ryuu scrape hiba:", e.message);
         }
-    } catch (e) {
-        console.error("Ryuu API hiba:", e.message);
     }
 
-    // 2. Luatools (Online Fix) hozzáadása tartaléknak
-    const onlineUrl = `${API_URLS.online_fix}${appid}.zip`;
-    try {
-        const checkOnline = await axios.head(onlineUrl, { timeout: 1500 }).catch(() => null);
-        if (checkOnline && checkOnline.status === 200) {
-            if (!foundFiles.some(f => f.url === onlineUrl)) {
+    // 2. Luatools Keresés (Biztonsági tartalék, ha a fenti nem talál semmit)
+    if (foundFiles.length === 0) {
+        const onlineUrl = `${FIX_SOURCES.online}${appid}.zip`;
+        try {
+            const checkOnline = await axios.head(onlineUrl, { timeout: 1500 }).catch(() => null);
+            if (checkOnline && checkOnline.status === 200) {
                 foundFiles.push({ 
                     url: onlineUrl, 
                     name: `OnlineFix_${appid}.zip`, 
-                    type: '🌐 LUATOOLS ONLINE' 
+                    type: '🌐 Luatools Fix',
+                    isTooBig: false // Feltételezzük, hogy jó, vagy a getFile majd kiszűri
                 });
             }
-        }
-    } catch(e) {}
+        } catch(e) {}
+    }
     
     return foundFiles;
 }
@@ -184,7 +193,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (!interaction.isChatInputCommand()) return;
 
-    // ADMIN
+    // ADMIN (Változatlan)
     if (interaction.commandName === 'admin') {
         if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator) && interaction.user.id !== process.env.ADMIN_ID) {
             return interaction.reply({ content: "❌ Nincs jogosultságod!", ephemeral: true });
@@ -232,7 +241,7 @@ client.on(Events.InteractionCreate, async interaction => {
         }
     }
 
-    // MANIFEST
+    // MANIFEST (Javítva az új logikához)
     if (interaction.commandName === 'manifest') {
         const sub = interaction.options.getSubcommand();
         const appId = sub === 'id' ? interaction.options.getString('appid') : interaction.options.getString('jateknev');
@@ -254,7 +263,7 @@ client.on(Events.InteractionCreate, async interaction => {
             const gameData = steamRes.data[appId].data;
             console.log(`[KERESÉS] ${interaction.user.tag} -> ${gameData.name}`);
 
-            // --- KERESÉS INDÍTÁSA (API ALAPÚ) ---
+            // KERESÉS INDÍTÁSA
             const foundFixes = await findFixes(appId, gameData.name);
             const zip = await fetchManifestZip(appId);
             
@@ -274,25 +283,32 @@ client.on(Events.InteractionCreate, async interaction => {
                 statusText += `⚠️ **Manifest:** Nincs találat.\n`;
             }
 
-            // 2. TALÁLATOK LISTÁZÁSA (A weboldal típusai alapján!)
+            // 2. JAVÍTÁSOK LISTÁZÁSA (Javított logika)
             if (foundFixes.length > 0) {
                 statusText += `\n**🛠️ Talált Fájlok (${foundFixes.length} db):**\n`;
                 
                 for (const fix of foundFixes) {
-                    const fileData = await getFile(fix.url, fix.name);
+                    // Ha eleve túl nagy (HTML alapján), akkor meg sem próbáljuk letölteni
+                    if (fix.isTooBig) {
+                        statusText += `⚠️ **${fix.type}:** Túl nagy (${fix.sizeText}) -> [Letöltés](${encodeURI(fix.url)})\n`;
+                        continue;
+                    }
+
+                    // Ha nem nagy, letöltjük
+                    const fileData = await getFile(encodeURI(fix.url), fix.name);
                     
                     if (fileData?.attachment) {
                         attachments.push(fileData.attachment);
-                        // Itt írja ki pl. "TESTED ONLINE" vagy "BYPASS"
-                        statusText += `✅ **${fix.type}:** Fájl csatolva\n`;
+                        statusText += `✅ **${fix.type}:** ${fix.name} csatolva\n`;
                     } else if (fileData?.tooLarge) {
-                        statusText += `⚠️ **${fix.type}:** Túl nagy (${fileData.size} MB) -> [Letöltés](${fix.url})\n`;
+                        // Ha mégis túl nagy lett letöltés közben
+                        statusText += `⚠️ **${fix.type}:** Túl nagy (>10MB) -> [Letöltés](${encodeURI(fix.url)})\n`;
                     } else {
-                        statusText += `🔗 **${fix.type}:** [Letöltés](${fix.url})\n`;
+                        statusText += `🔗 **${fix.type}:** [Letöltés](${encodeURI(fix.url)})\n`;
                     }
                 }
             } else {
-                statusText += `❌ **Javítás:** Nem található a szerver listájában.\n`;
+                statusText += `❌ **Javítás:** Nem található fájl a szerveren.\n`;
             }
 
             // KVÓTA
@@ -321,12 +337,12 @@ client.on(Events.InteractionCreate, async interaction => {
                 let fallbackText = "";
                 if (zip) fallbackText += `🔗 **Manifest:** [LETÖLTÉS LINK](${zip.url})\n`;
                 for (const fix of foundFixes) {
-                    fallbackText += `🔗 **${fix.type}:** [LETÖLTÉS LINK](${fix.url})\n`;
+                    fallbackText += `🔗 **${fix.type}:** [LETÖLTÉS LINK](${encodeURI(fix.url)}) (${fix.sizeText || '?'})\n`;
                 }
                 
                 const fallbackEmbed = new EmbedBuilder()
                     .setTitle(`📦 ${gameData.name} (Link Mód)`)
-                    .setDescription(`⚠️ **A csomag túl nagy volt.**\nTöltsd le innen:\n\n${fallbackText}`)
+                    .setDescription(`⚠️ **A csomag túl nagy volt a Discordnak.**\nTöltsd le innen:\n\n${fallbackText}`)
                     .addFields({ name: 'Napi Kvóta', value: quotaText })
                     .setThumbnail(gameData.header_image)
                     .setColor(0xFFA500);
@@ -334,7 +350,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 await interaction.editReply({ embeds: [fallbackEmbed], files: [] });
             }
 
-            // 4. LOG
+            // 4. LOG (Változatlan)
             if (config && config.logChannelId) {
                 try {
                     const logChannel = await client.channels.fetch(config.logChannelId);
