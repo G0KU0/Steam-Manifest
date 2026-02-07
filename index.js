@@ -6,7 +6,7 @@ const {
 const axios = require('axios');
 const mongoose = require('mongoose');
 const express = require('express');
-const cheerio = require('cheerio'); // ÚJ: HTML olvasó
+const cheerio = require('cheerio'); // HTML olvasó
 
 // --- 1. KONFIGURÁCIÓ ---
 const LIMITS = {
@@ -17,7 +17,7 @@ const LIMITS = {
 
 // --- 2. WEBSZERVER ---
 const app = express();
-app.get('/', (req, res) => res.send('SteamTools Master Bot Online!'));
+app.get('/', (req, res) => res.send('Bot fut és készen áll!'));
 app.listen(process.env.PORT || 3000);
 
 // --- 3. ADATBÁZIS ---
@@ -37,10 +37,10 @@ const ConfigSchema = new mongoose.Schema({
 });
 const ConfigModel = mongoose.model('Config', ConfigSchema);
 
-// --- 4. FORRÁSOK (Minden régi forrás megmaradt!) ---
+// --- 4. FORRÁSOK ---
 const FIX_SOURCES = {
     online: "https://files.luatools.work/OnlineFix1/",
-    ryuu_base: "https://generator.ryuu.lol" // Az új scrapinghez
+    ryuu_base: "https://generator.ryuu.lol"
 };
 
 const MANIFEST_SOURCES = [
@@ -77,12 +77,10 @@ async function checkQuota(userId) {
     return { allowed: true, user };
 }
 
-// Ez kezeli a Manifestek letöltését a fenti MANIFEST_SOURCES listából
 async function fetchManifestZip(id) {
     for (const source of MANIFEST_SOURCES) {
         try {
             const url = source.url(id);
-            // Rövid timeout, hogy gyorsan végigérjen
             const res = await axios({ method: 'get', url: url, responseType: 'arraybuffer', timeout: 3500 });
             if (res.status === 200) {
                 return { data: res.data, source: source.name, url: url }; 
@@ -92,7 +90,6 @@ async function fetchManifestZip(id) {
     return null;
 }
 
-// Általános fájl letöltő
 async function getFile(url, fileName) {
     try {
         const res = await axios.get(url, { responseType: 'arraybuffer', timeout: 30000, headers: { 'User-Agent': 'Mozilla/5.0' } });
@@ -100,11 +97,11 @@ async function getFile(url, fileName) {
     } catch (e) { return null; }
 }
 
-// --- JAVÍTOTT KERESŐ (EZ A RÉSZ FRISSÜLT A HTML KÓDODRA!) ---
+// --- KERESŐ FÜGGVÉNY ---
 async function findFixes(appid, gameName) {
-    let foundFiles = [];
+    let foundFiles = []; // Itt gyűjtjük a fájlokat
 
-    // 1. Ryuu HTML Scraping (A weboldalról olvassa le a fájlokat)
+    // 1. Ryuu HTML Scraping
     if (gameName) {
         const searchUrl = `${FIX_SOURCES.ryuu_base}/fixes/${encodeURIComponent(gameName)}`;
         
@@ -117,19 +114,15 @@ async function findFixes(appid, gameName) {
             if (response && response.data) {
                 const $ = cheerio.load(response.data);
                 
-                // Végigmegyünk az összes .fix-item elemen (több fájl is lehet!)
                 $('.fix-item').each((index, element) => {
                     const relativeLink = $(element).attr('href');
                     const name = $(element).find('.fix-name').text().trim();
                     const sizeText = $(element).find('.fix-size').text().trim(); 
-                    
-                    // Badgek (Tested, Bypass, Online)
                     const badges = $(element).find('.fix-badge').map((i, el) => $(el).text().trim()).get().join(' | ');
 
                     if (relativeLink && name) {
                         const fullUrl = relativeLink.startsWith('http') ? relativeLink : `${FIX_SOURCES.ryuu_base}${relativeLink}`;
                         
-                        // Méret ellenőrzés a Discord limithez (25MB)
                         let isTooBig = false;
                         if (sizeText.includes('GB')) isTooBig = true;
                         if (sizeText.includes('MB')) {
@@ -137,7 +130,6 @@ async function findFixes(appid, gameName) {
                             if (sizeNum > 24.5) isTooBig = true;
                         }
 
-                        // Típus meghatározása a badge alapján
                         let type = "Fix";
                         if (badges.toLowerCase().includes('bypass')) type = "🛡️ Bypass";
                         else if (badges.toLowerCase().includes('online')) type = "🌐 Online Fix";
@@ -145,9 +137,9 @@ async function findFixes(appid, gameName) {
                         foundFiles.push({
                             url: fullUrl,
                             name: name.endsWith('.zip') ? name : `${name}.zip`,
-                            type: type,      // Bypass vagy Online
-                            badges: badges,  // Részletek (pl. Tested)
-                            sizeText: sizeText, // 0.8 MB
+                            type: type,
+                            badges: badges,
+                            sizeText: sizeText,
                             isTooBig: isTooBig
                         });
                     }
@@ -158,12 +150,11 @@ async function findFixes(appid, gameName) {
         }
     }
 
-    // 2. Luatools Keresés (Biztonsági tartalék - megmaradt a régi)
+    // 2. Luatools Keresés (Backup)
     const onlineUrl = `${FIX_SOURCES.online}${appid}.zip`;
     try {
         const checkOnline = await axios.head(onlineUrl, { timeout: 1500 }).catch(() => null);
         if (checkOnline && checkOnline.status === 200) {
-            // Csak akkor adjuk hozzá, ha a Ryuu nem találta meg ugyanezt
             if (!foundFiles.some(f => f.url === onlineUrl)) {
                 foundFiles.push({ 
                     url: onlineUrl, 
@@ -183,7 +174,7 @@ async function findFixes(appid, gameName) {
 // --- 6. ESEMÉNYEK ---
 
 client.on(Events.InteractionCreate, async interaction => {
-    // Autocomplete (Maradt a régi Steam alapú)
+    // Autocomplete
     if (interaction.isAutocomplete()) {
         const focused = interaction.options.getFocused();
         if (!focused) return interaction.respond([]);
@@ -195,7 +186,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (!interaction.isChatInputCommand()) return;
 
-    // ADMIN PARANCS (Teljesen megmaradt)
+    // ADMIN
     if (interaction.commandName === 'admin') {
         if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator) && interaction.user.id !== process.env.ADMIN_ID) {
             return interaction.reply({ content: "❌ Nincs jogosultságod!", ephemeral: true });
@@ -243,7 +234,7 @@ client.on(Events.InteractionCreate, async interaction => {
         }
     }
 
-    // MANIFEST PARANCS (Frissítve a HTML adatok kezelésével)
+    // MANIFEST PARANCS
     if (interaction.commandName === 'manifest') {
         const sub = interaction.options.getSubcommand();
         const appId = sub === 'id' ? interaction.options.getString('appid') : interaction.options.getString('jateknev');
@@ -256,24 +247,24 @@ client.on(Events.InteractionCreate, async interaction => {
         const quota = await checkQuota(interaction.user.id);
         if (!quota.allowed) return interaction.reply({ content: quota.error, ephemeral: true });
 
-        await interaction.deferReply(); // Ephemeral kikapcsolva, hogy lássák a fájlokat
+        await interaction.deferReply();
 
         try {
-            // Steam adatok lekérése a névhez és képhez
             const steamRes = await axios.get(`https://store.steampowered.com/api/appdetails?appids=${appId}&l=hungarian`);
             if (!steamRes.data[appId]?.success) return interaction.editReply("❌ Játék nem található a Steamen.");
 
             const gameData = steamRes.data[appId].data;
             console.log(`[KERESÉS] ${interaction.user.tag} -> ${gameData.name}`);
 
-            // --- KERESÉS INDÍTÁSA ---
-            const foundFixes = await findFixes(appId, gameData.name); // Itt fut a Cheerio és a LuaTools is
-            const zip = await fetchManifestZip(appId); // Itt futnak a Manifest források
+            // --- VÁLTOZÓ JAVÍTÁSA: foundFiles ---
+            // Itt egységesítettem a nevet. A függvény eredménye 'foundFiles' néven lesz elérhető.
+            const foundFiles = await findFixes(appId, gameData.name); 
+            const zip = await fetchManifestZip(appId);
             
             let attachments = [];
             let statusText = "";
 
-            // 1. MANIFEST (Régi logika)
+            // 1. MANIFEST
             if (zip) {
                 if (zip.data.length > 10 * 1024 * 1024) { 
                     const sizeMB = (zip.data.length / 1024 / 1024).toFixed(1);
@@ -283,25 +274,22 @@ client.on(Events.InteractionCreate, async interaction => {
                     statusText += `✅ **Manifest:** Fájl csatolva (${zip.source})\n`;
                 }
             } else {
-                statusText += `❌ **Manifest:** Nincs találat egyetlen forrásban sem.\n`;
+                statusText += `❌ **Manifest:** Nincs találat.\n`;
             }
 
-            // 2. JAVÍTÁSOK LISTÁZÁSA (Új HTML adatokkal)
-            if (foundFixes.length > 0) {
-                statusText += `\n**🛠️ Talált Fájlok (${foundFixes.length} db):**\n`;
+            // 2. JAVÍTÁSOK LISTÁZÁSA (foundFiles használata foundFixes helyett!)
+            if (foundFiles.length > 0) {
+                statusText += `\n**🛠️ Talált Fájlok (${foundFiles.length} db):**\n`;
                 
-                for (const fix of foundFixes) {
-                    // Címkék és méret megjelenítése
+                for (const fix of foundFiles) {
                     const badges = fix.badges ? `| 🏷️ ${fix.badges}` : "";
                     const sizeInfo = fix.sizeText ? `| 📏 ${fix.sizeText}` : "";
 
-                    // Ha a HTML szerint túl nagy, meg sem próbáljuk letölteni
                     if (fix.isTooBig) {
                         statusText += `⚠️ **${fix.type}:** Túl nagy Discordhoz ${sizeInfo} -> [Letöltés](${encodeURI(fix.url)})\n`;
                         continue;
                     }
 
-                    // Letöltés megkísérlése
                     const fileData = await getFile(encodeURI(fix.url), fix.name);
                     
                     if (fileData?.attachment) {
@@ -336,12 +324,14 @@ client.on(Events.InteractionCreate, async interaction => {
             try {
                 await interaction.editReply({ embeds: [embed], files: attachments });
             } catch (sendError) {
-                // Ha a végső csomag túl nagy lenne (pl. 3 db 8MB-os fájl)
+                // FALLBACK (Itt volt a hiba, javítva foundFiles-ra!)
                 console.log("Küldési hiba (túl nagy csomag), váltás Link módra.");
                 
                 let fallbackText = "";
                 if (zip) fallbackText += `🔗 **Manifest:** [LETÖLTÉS](${zip.url})\n`;
-                for (const fix of foundFixes) {
+                
+                // JAVÍTVA: foundFiles használata
+                for (const fix of foundFiles) {
                     fallbackText += `🔗 **${fix.type}:** [LETÖLTÉS](${encodeURI(fix.url)}) (${fix.sizeText || '?'})\n`;
                 }
                 
@@ -355,7 +345,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 await interaction.editReply({ embeds: [fallbackEmbed], files: [] });
             }
 
-            // 4. LOG (Maradt a régi)
+            // 4. LOG (Itt is javítva foundFiles-ra!)
             if (config && config.logChannelId) {
                 try {
                     const logChannel = await client.channels.fetch(config.logChannelId);
@@ -367,7 +357,7 @@ client.on(Events.InteractionCreate, async interaction => {
                             .addFields(
                                 { name: 'User', value: `${interaction.user.tag}`, inline: true },
                                 { name: 'Játék', value: `${gameData.name}`, inline: true },
-                                { name: 'Fájlok', value: `${foundFixes.length} db + Manifest`, inline: true }
+                                { name: 'Fájlok', value: `${foundFiles.length} db + Manifest`, inline: true }
                             )
                             .setTimestamp();
                         await logChannel.send({ embeds: [logEmbed] });
@@ -382,7 +372,7 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 });
 
-// --- 7. START (Parancs regisztráció maradt a régi) ---
+// --- 7. START ---
 client.once('ready', async () => {
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
     const commands = [
