@@ -272,7 +272,9 @@ client.on(Events.InteractionCreate, async interaction => {
         const quota = await checkQuota(interaction.user.id);
         if (!quota.allowed) return interaction.reply({ content: quota.error, ephemeral: true });
 
-        await interaction.deferReply();
+        // --- ITT A VÁLTOZTATÁS: ephemeral: true ---
+        // Ez teszi priváttá az üzenetet (Csak te látod)
+        await interaction.deferReply({ ephemeral: true });
 
         try {
             const steamRes = await axios.get(`https://store.steampowered.com/api/appdetails?appids=${appId}&l=hungarian`);
@@ -370,7 +372,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 await interaction.editReply({ embeds: [fallbackEmbed], files: [] });
             }
 
-            // 4. LOG
+            // 4. LOG (Ez továbbra is nyilvános/privát marad a log csatorna beállításától függően)
             if (config && config.logChannelId) {
                 try {
                     const logChannel = await client.channels.fetch(config.logChannelId);
