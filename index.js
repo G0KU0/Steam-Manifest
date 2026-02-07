@@ -6,7 +6,7 @@ const {
 const axios = require('axios');
 const mongoose = require('mongoose');
 const express = require('express');
-const cheerio = require('cheerio'); // HTML olvasó
+const cheerio = require('cheerio'); 
 
 // --- 1. KONFIGURÁCIÓ ---
 const LIMITS = {
@@ -105,14 +105,22 @@ async function getFile(url, fileName) {
     }
 }
 
-function cleanName(name) {
-    return name.toLowerCase().replace(/[^a-z0-9]/g, '');
+// ÚJ: Okos tisztító függvény
+// Eltávolítja a szemetet a névből, hogy könnyebb legyen a keresés
+function normalizeString(str) {
+    return str.toLowerCase()
+        .replace(/['"®™]/g, '') // Védjegyek törlése
+        .replace(/[^a-z0-9]/g, ' ') // Minden speciális jel helyett szóköz
+        .trim();
 }
 
-// --- JAVÍTOTT KERESŐ (CÍMKÉKKEL) ---
+// --- JAVÍTOTT KERESŐ (OKOS KERESÉSSEL) ---
 async function findFixes(appid, gameName) {
     let foundFiles = [];
-    const targetNameClean = cleanName(gameName); 
+    
+    // 1. A keresett név szavakra bontása
+    // Pl: "Forza Horizon 5" -> ["forza", "horizon", "5"]
+    const searchWords = normalizeString(gameName).split(/\s+/).filter(w => w.length > 1);
 
     try {
         // 1. Ryuu Lista Letöltése
@@ -124,50 +132,59 @@ async function findFixes(appid, gameName) {
             const $ = cheerio.load(response.data);
             
             $('.fix-item').each((index, element) => {
-                const name = $(element).find('.fix-name').text().trim();
-                const fileNameClean = cleanName(name);
+                // Megpróbáljuk kinyerni a nevet. Ha nincs .fix-name, akkor a href-ből találjuk ki.
+                let name = $(element).find('.fix-name').text().trim();
+                const relativeLink = $(element).attr('href');
 
-                // Ha a név egyezik
-                if (name && fileNameClean.includes(targetNameClean)) {
-                    
-                    const relativeLink = $(element).attr('href');
-                    const sizeText = $(element).find('.fix-size').text().trim(); 
-                    
-                    // --- CÍMKÉK BEOLVASÁSA ÉS FORMÁZÁSA ---
-                    const rawBadges = $(element).find('.fix-badge').map((i, el) => $(el).text().trim()).get();
-                    
-                    // Emojik hozzárendelése a címkékhez
-                    const formattedBadges = rawBadges.map(badge => {
-                        const lower = badge.toLowerCase();
-                        if (lower === 'tested') return '✅ **Tested**';
-                        if (lower === 'online') return '🌐 **Online**';
-                        if (lower === 'bypass') return '🛡️ **Bypass**';
-                        if (lower === 'unstable') return '⚠️ **Unstable**';
-                        return `🏷️ ${badge}`;
-                    }).join(' '); // Egy sorba fűzzük őket
+                // Ha nincs név szöveg, szedjük ki a linkből (pl. /fixes/JatekNeve.zip)
+                if (!name && relativeLink) {
+                    name = relativeLink.split('/').pop().replace(/%20/g, ' ');
+                }
 
-                    const fullUrl = relativeLink.startsWith('http') ? relativeLink : `${RYUU_BASE}${relativeLink}`;
-                    
-                    let isTooBig = false;
-                    if (sizeText.includes('GB')) isTooBig = true;
-                    if (sizeText.includes('MB')) {
-                        const sizeNum = parseFloat(sizeText.replace(/[^0-9.]/g, ''));
-                        if (sizeNum > 24.5) isTooBig = true;
+                if (name) {
+                    const normalizedFileName = normalizeString(name);
+
+                    // --- OKOS KERESÉS ---
+                    // Megnézzük, hogy a keresett szavak közül MINDEGYIK benne van-e a fájl nevében.
+                    // Ez sokkal rugalmasabb, mint a sima egyezés.
+                    const isMatch = searchWords.every(word => normalizedFileName.includes(word));
+
+                    if (isMatch) {
+                        const sizeText = $(element).find('.fix-size').text().trim(); 
+                        
+                        // Címkék kezelése
+                        const rawBadges = $(element).find('.fix-badge').map((i, el) => $(el).text().trim()).get();
+                        const formattedBadges = rawBadges.map(badge => {
+                            const lower = badge.toLowerCase();
+                            if (lower === 'tested') return '✅ **Tested**';
+                            if (lower === 'online') return '🌐 **Online**';
+                            if (lower === 'bypass') return '🛡️ **Bypass**';
+                            if (lower === 'unstable') return '⚠️ **Unstable**';
+                            return `🏷️ ${badge}`;
+                        }).join(' ');
+
+                        const fullUrl = relativeLink.startsWith('http') ? relativeLink : `${RYUU_BASE}${relativeLink}`;
+                        
+                        let isTooBig = false;
+                        if (sizeText.includes('GB')) isTooBig = true;
+                        if (sizeText.includes('MB')) {
+                            const sizeNum = parseFloat(sizeText.replace(/[^0-9.]/g, ''));
+                            if (sizeNum > 24.5) isTooBig = true;
+                        }
+
+                        let type = "Fix";
+                        if (formattedBadges.includes('Bypass')) type = "🛡️ Bypass";
+                        else if (formattedBadges.includes('Online')) type = "🌐 Online Fix";
+
+                        foundFiles.push({
+                            url: fullUrl,
+                            name: name.endsWith('.zip') ? name : `${name}.zip`,
+                            type: type,
+                            badges: formattedBadges,
+                            sizeText: sizeText,
+                            isTooBig: isTooBig
+                        });
                     }
-
-                    // Típus meghatározása (fő címke)
-                    let type = "Fix";
-                    if (formattedBadges.includes('Bypass')) type = "🛡️ Bypass";
-                    else if (formattedBadges.includes('Online')) type = "🌐 Online Fix";
-
-                    foundFiles.push({
-                        url: fullUrl,
-                        name: name.endsWith('.zip') ? name : `${name}.zip`,
-                        type: type,
-                        badges: formattedBadges, // Itt vannak a szép emojik
-                        sizeText: sizeText,
-                        isTooBig: isTooBig
-                    });
                 }
             });
         }
@@ -185,7 +202,7 @@ async function findFixes(appid, gameName) {
                     url: onlineUrl, 
                     name: `OnlineFix_${appid}.zip`, 
                     type: '🌐 Luatools Fix',
-                    badges: '🌐 **Online**', // Luatools mindig online fix
+                    badges: '🌐 **Online**',
                     sizeText: 'Unknown',
                     isTooBig: false 
                 });
@@ -272,8 +289,7 @@ client.on(Events.InteractionCreate, async interaction => {
         const quota = await checkQuota(interaction.user.id);
         if (!quota.allowed) return interaction.reply({ content: quota.error, ephemeral: true });
 
-        // --- ITT A VÁLTOZTATÁS: ephemeral: true ---
-        // Ez teszi priváttá az üzenetet (Csak te látod)
+        // PRIVÁT VÁLASZ (Ephemeral)
         await interaction.deferReply({ ephemeral: true });
 
         try {
@@ -303,13 +319,11 @@ client.on(Events.InteractionCreate, async interaction => {
                 statusText += `❌ **Manifest:** Nincs találat.\n`;
             }
 
-            // 2. JAVÍTÁSOK LISTÁZÁSA (Szépített kiírás)
+            // 2. JAVÍTÁSOK LISTÁZÁSA
             if (foundFiles.length > 0) {
                 statusText += `\n**🛠️ Talált Fájlok (${foundFiles.length} db):**\n`;
                 
                 for (const fix of foundFiles) {
-                    // Itt jelenítjük meg a címkéket!
-                    // Pl: 🛡️ Bypass 🌐 Online | 📏 0.8 MB
                     const badgeLine = fix.badges ? `${fix.badges}` : ""; 
                     const sizeInfo = fix.sizeText ? `| 📏 \`${fix.sizeText}\`` : "";
 
@@ -352,7 +366,6 @@ client.on(Events.InteractionCreate, async interaction => {
             try {
                 await interaction.editReply({ embeds: [embed], files: attachments });
             } catch (sendError) {
-                // FALLBACK
                 console.log("Küldési hiba (túl nagy csomag), váltás Link módra.");
                 
                 let fallbackText = "";
@@ -372,7 +385,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 await interaction.editReply({ embeds: [fallbackEmbed], files: [] });
             }
 
-            // 4. LOG (Ez továbbra is nyilvános/privát marad a log csatorna beállításától függően)
+            // 4. LOG (Ez marad nyilvános a log csatornán, ha be van állítva)
             if (config && config.logChannelId) {
                 try {
                     const logChannel = await client.channels.fetch(config.logChannelId);
