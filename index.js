@@ -30,10 +30,9 @@ const UserSchema = new mongoose.Schema({
 });
 const UserModel = mongoose.model('User', UserSchema);
 
-// ÚJ: logChannelId hozzáadva a beállításokhoz
 const ConfigSchema = new mongoose.Schema({
     allowedChannels: [String],
-    logChannelId: { type: String, default: null } 
+    logChannelId: { type: String, default: null }
 });
 const ConfigModel = mongoose.model('Config', ConfigSchema);
 
@@ -105,20 +104,59 @@ async function getFile(url, fileName) {
     } catch (e) { return null; }
 }
 
+// --- ÚJ "MINDENT BELE" KERESŐ ---
 async function findFixes(appid, gameName) {
+    let foundFiles = [];
+
+    // 1. Ryuu Keresés (Több variáció tesztelése)
     if (gameName) {
-        const clean = gameName.replace(/[:™®]/g, "");
-        const patterns = [`${clean} Online Patch - Tested OK.zip`, `${clean} - Tested OK.zip`, `${clean} Online.zip`, `${clean}.zip`];
-        for (const p of patterns) {
-            const url = `${FIX_SOURCES.ryuu_fixes}/${encodeURIComponent(p)}`;
-            const check = await axios.head(url).catch(() => null);
-            if (check && check.status === 200) return { url, name: p };
+        const clean = gameName.replace(/[:™®]/g, ""); 
+        
+        // Itt felsoroljuk, hogy milyen neveken szokott lenni fájl a szerveren.
+        // A bot mindegyiket megpróbálja letölteni (virtuálisan).
+        const candidates = [
+            { suffix: '.zip', label: '📁 Alap Javítás (Fix)' },        // Sima név
+            { suffix: ' Bypass.zip', label: '🛡️ Bypass' },             // Külön Bypass fájl
+            { suffix: ' Online Fix.zip', label: '🌐 Online Fix' },     // Külön Online Fix fájl
+            { suffix: ' Fix.zip', label: '🔧 Fix' },                  // "Fix" végződés
+            { suffix: ' Online.zip', label: '🌐 Online' }              // "Online" végződés
+        ];
+
+        for (const candidate of candidates) {
+            const fileName = `${clean}${candidate.suffix}`;
+            const url = `${FIX_SOURCES.ryuu_fixes}/${encodeURIComponent(fileName)}`;
+            
+            try {
+                // Megnézzük, létezik-e ez a verzió
+                const check = await axios.head(url, { timeout: 1200 }).catch(() => null);
+                if (check && check.status === 200) {
+                    foundFiles.push({ 
+                        url: url, 
+                        name: fileName, 
+                        type: candidate.label 
+                    });
+                }
+            } catch (e) { continue; }
         }
     }
+
+    // 2. Luatools Keresés (AppID alapján - Ez általában Online Fix)
     const onlineUrl = `${FIX_SOURCES.online}${appid}.zip`;
-    const checkOnline = await axios.head(onlineUrl).catch(() => null);
-    if (checkOnline && checkOnline.status === 200) return { url: onlineUrl, name: `OnlineFix_${appid}.zip` };
-    return { url: null, name: "" };
+    try {
+        const checkOnline = await axios.head(onlineUrl, { timeout: 1500 }).catch(() => null);
+        if (checkOnline && checkOnline.status === 200) {
+            // Csak akkor adjuk hozzá, ha még nincs meg (duplikáció elkerülése)
+            if (!foundFiles.some(f => f.url === onlineUrl)) {
+                foundFiles.push({ 
+                    url: onlineUrl, 
+                    name: `OnlineFix_${appid}.zip`, 
+                    type: '🌐 Luatools Fix' 
+                });
+            }
+        }
+    } catch(e) {}
+    
+    return foundFiles; // Visszaadja az összes talált verziót
 }
 
 // --- 6. ESEMÉNYEK ---
@@ -136,7 +174,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (!interaction.isChatInputCommand()) return;
 
-    // --- ADMIN PARANCSOK ---
+    // ADMIN
     if (interaction.commandName === 'admin') {
         if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator) && interaction.user.id !== process.env.ADMIN_ID) {
             return interaction.reply({ content: "❌ Nincs jogosultságod!", ephemeral: true });
@@ -144,59 +182,47 @@ client.on(Events.InteractionCreate, async interaction => {
         const group = interaction.options.getSubcommandGroup();
         const sub = interaction.options.getSubcommand();
         
-        // --- FELHASZNÁLÓK ---
         if (group === 'user') {
             const target = interaction.options.getUser('target');
-            
-            // Hozzáadás
             if (sub === 'add') {
                 const rank = interaction.options.getInteger('rank');
                 await UserModel.findOneAndUpdate({ userId: target.id }, { userId: target.id, rank: rank }, { upsert: true, new: true });
                 return interaction.reply({ content: `✅ **${target.tag}** hozzáadva! Rang: **${rank}**`, ephemeral: true });
             }
-            // Törlés
             if (sub === 'remove') {
                 await UserModel.findOneAndDelete({ userId: target.id });
                 return interaction.reply({ content: `🗑️ **${target.tag}** törölve.`, ephemeral: true });
             }
-            // ÚJ: RESET (Nullázás)
             if (sub === 'reset') {
-                const user = await UserModel.findOneAndUpdate({ userId: target.id }, { dailyUsage: 0 }, { new: true });
-                if (!user) return interaction.reply({ content: "❌ Ez a felhasználó nincs az adatbázisban.", ephemeral: true });
-                return interaction.reply({ content: `🔄 **${target.tag}** napi kvótája lenullázva! (0 használat)`, ephemeral: true });
+                await UserModel.findOneAndUpdate({ userId: target.id }, { dailyUsage: 0 });
+                return interaction.reply({ content: `🔄 **${target.tag}** kvótája lenullázva.`, ephemeral: true });
             }
         }
-
-        // --- CSATORNÁK ---
         if (group === 'channel') {
             const targetChannel = interaction.options.getChannel('target') || interaction.channel;
             let config = await ConfigModel.findOne() || await ConfigModel.create({ allowedChannels: [] });
-            
-            // Engedélyezés (Whitelist)
             if (sub === 'add') {
                 if (!config.allowedChannels.includes(targetChannel.id)) {
                     config.allowedChannels.push(targetChannel.id);
                     await config.save();
-                    return interaction.reply({ content: `✅ Csatorna engedélyezve (használat): ${targetChannel}`, ephemeral: true });
+                    return interaction.reply({ content: `✅ Csatorna engedélyezve: ${targetChannel}`, ephemeral: true });
                 }
                 return interaction.reply({ content: `⚠️ Már engedélyezve van.`, ephemeral: true });
             }
-            // Tiltás
             if (sub === 'remove') {
                 config.allowedChannels = config.allowedChannels.filter(id => id !== targetChannel.id);
                 await config.save();
                 return interaction.reply({ content: `🚫 Csatorna tiltva.`, ephemeral: true });
             }
-            // ÚJ: LOG CSATORNA BEÁLLÍTÁS
             if (sub === 'setlog') {
                 config.logChannelId = targetChannel.id;
                 await config.save();
-                return interaction.reply({ content: `📜 **Log Csatorna beállítva:** ${targetChannel}\nIde fogja küldeni a bot, hogy ki mit töltött le.`, ephemeral: true });
+                return interaction.reply({ content: `📜 Log csatorna beállítva: ${targetChannel}`, ephemeral: true });
             }
         }
     }
 
-    // --- MANIFEST PARANCS ---
+    // MANIFEST
     if (interaction.commandName === 'manifest') {
         const sub = interaction.options.getSubcommand();
         const appId = sub === 'id' ? interaction.options.getString('appid') : interaction.options.getString('jateknev');
@@ -216,13 +242,16 @@ client.on(Events.InteractionCreate, async interaction => {
             if (!steamRes.data[appId]?.success) return interaction.editReply("❌ Játék nem található.");
 
             const gameData = steamRes.data[appId].data;
-            const fix = await findFixes(appId, gameData.name);
+            console.log(`[KERESÉS] ${interaction.user.tag} -> ${gameData.name}`);
+
+            // --- KERESÉS INDÍTÁSA (Több fájlt is kereshet) ---
+            const foundFixes = await findFixes(appId, gameData.name);
             const zip = await fetchManifestZip(appId);
             
             let attachments = [];
             let statusText = "";
 
-            // 1. MANIFEST (10 MB LIMIT)
+            // 1. MANIFEST (10MB LIMIT)
             if (zip) {
                 if (zip.data.length > 10 * 1024 * 1024) { 
                     const sizeMB = (zip.data.length / 1024 / 1024).toFixed(1);
@@ -235,20 +264,27 @@ client.on(Events.InteractionCreate, async interaction => {
                 statusText += `⚠️ **Manifest:** Nincs találat.\n`;
             }
 
-            // 2. ONLINE FIX (10 MB LIMIT)
-            if (fix.url) {
-                const fileData = await getFile(fix.url, fix.name);
-                if (fileData?.attachment) {
-                    attachments.push(fileData.attachment);
-                    statusText += `✅ **Online Fix:** Fájl csatolva\n`;
-                } else if (fileData?.tooLarge) {
-                    statusText += `⚠️ **Online Fix:** Túl nagy (${fileData.size} MB) -> [Letöltés](${fix.url})\n`;
-                } else {
-                    statusText += `🔗 **Online Fix:** [Letöltés](${fix.url})\n`;
+            // 2. TALÁLATOK LISTÁZÁSA (Ha van "1 Fix" vagy "2 Fixes")
+            if (foundFixes.length > 0) {
+                statusText += `\n**🛠️ Talált Javítások (${foundFixes.length} db):**\n`;
+                
+                for (const fix of foundFixes) {
+                    const fileData = await getFile(fix.url, fix.name);
+                    
+                    if (fileData?.attachment) {
+                        attachments.push(fileData.attachment);
+                        statusText += `✅ **${fix.type}:** Fájl csatolva\n`;
+                    } else if (fileData?.tooLarge) {
+                        statusText += `⚠️ **${fix.type}:** Túl nagy (${fileData.size} MB) -> [Letöltés](${fix.url})\n`;
+                    } else {
+                        statusText += `🔗 **${fix.type}:** [Letöltés](${fix.url})\n`;
+                    }
                 }
+            } else {
+                statusText += `❌ **Javítás:** Nem található fájl a szerveren.\n`;
             }
 
-            // KVÓTA LEVONÁS
+            // KVÓTA
             quota.user.dailyUsage += 1;
             await quota.user.save();
             const remaining = LIMITS[quota.user.rank] === Infinity ? "∞" : LIMITS[quota.user.rank] - quota.user.dailyUsage;
@@ -265,19 +301,21 @@ client.on(Events.InteractionCreate, async interaction => {
                 )
                 .setFooter({ text: "SteamTools Master" });
 
-            // 3. KÜLDÉS (FAIL-SAFE MÓD)
+            // 3. KÜLDÉS (FAIL-SAFE)
             try {
                 await interaction.editReply({ embeds: [embed], files: attachments });
             } catch (sendError) {
-                console.log("Feltöltési hiba, váltás linkre:", sendError.message);
+                console.log("Méret hiba, váltás Full Link módra.");
                 
                 let fallbackText = "";
                 if (zip) fallbackText += `🔗 **Manifest:** [LETÖLTÉS LINK](${zip.url})\n`;
-                if (fix.url) fallbackText += `🔗 **Online Fix:** [LETÖLTÉS LINK](${fix.url})\n`;
+                for (const fix of foundFixes) {
+                    fallbackText += `🔗 **${fix.type}:** [LETÖLTÉS LINK](${fix.url})\n`;
+                }
                 
                 const fallbackEmbed = new EmbedBuilder()
-                    .setTitle(`📦 ${gameData.name} (Biztonsági Link Mód)`)
-                    .setDescription(`⚠️ **A csomag túl nagy volt a Discordnak.**\nKérlek töltsd le őket innen:\n\n${fallbackText}`)
+                    .setTitle(`📦 ${gameData.name} (Link Mód)`)
+                    .setDescription(`⚠️ **A csomag túl nagy volt.**\nTöltsd le innen:\n\n${fallbackText}`)
                     .addFields({ name: 'Napi Kvóta', value: quotaText })
                     .setThumbnail(gameData.header_image)
                     .setColor(0xFFA500);
@@ -285,38 +323,34 @@ client.on(Events.InteractionCreate, async interaction => {
                 await interaction.editReply({ embeds: [fallbackEmbed], files: [] });
             }
 
-            // --- 4. LOG KÜLDÉSE A KÜLÖN CSATORNÁBA (HA BE VAN ÁLLÍTVA) ---
+            // 4. LOG
             if (config && config.logChannelId) {
                 try {
                     const logChannel = await client.channels.fetch(config.logChannelId);
                     if (logChannel) {
                         const logEmbed = new EmbedBuilder()
-                            .setTitle("📜 Játék Lekérés")
+                            .setTitle("📜 Sikeres Lekérés")
                             .setColor(0x3498db)
                             .setThumbnail(gameData.header_image)
                             .addFields(
-                                { name: 'Felhasználó', value: `${interaction.user} (${interaction.user.tag})`, inline: true },
+                                { name: 'User', value: `${interaction.user.tag}`, inline: true },
                                 { name: 'Játék', value: `${gameData.name}`, inline: true },
-                                { name: 'AppID', value: `${appId}`, inline: true },
-                                { name: 'Kvóta', value: `${quota.user.dailyUsage} db ma`, inline: true }
+                                { name: 'Fájlok', value: `${foundFixes.length} db + Manifest`, inline: true }
                             )
                             .setTimestamp();
                         await logChannel.send({ embeds: [logEmbed] });
                     }
-                } catch (err) {
-                    console.error("Nem sikerült a log küldése:", err.message);
-                }
+                } catch (e) {}
             }
-            // -------------------------------------------------------------
 
         } catch (e) {
             console.error(e);
-            await interaction.editReply({ content: "❌ Váratlan hiba történt.", files: [] });
+            await interaction.editReply({ content: "❌ Hiba történt.", files: [] });
         }
     }
 });
 
-// --- 7. START ÉS REGISZTRÁCIÓ ---
+// --- 7. START ---
 client.once('ready', async () => {
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
     const commands = [
@@ -332,13 +366,11 @@ client.once('ready', async () => {
             .addSubcommandGroup(group => group.setName('user').setDescription('Felhasználók')
                 .addSubcommand(sub => sub.setName('add').setDescription('Hozzáadás').addUserOption(o => o.setName('target').setDescription('Felhasználó').setRequired(true)).addIntegerOption(o => o.setName('rank').setDescription('Rang').setRequired(true).addChoices({ name: 'Rang 1', value: 1 }, { name: 'Rang 2', value: 2 }, { name: 'Rang 3', value: 3 })))
                 .addSubcommand(sub => sub.setName('remove').setDescription('Törlés').addUserOption(o => o.setName('target').setDescription('Felhasználó').setRequired(true)))
-                // ÚJ PARANCS: RESET
                 .addSubcommand(sub => sub.setName('reset').setDescription('Kvóta nullázása').addUserOption(o => o.setName('target').setDescription('Felhasználó').setRequired(true))))
             .addSubcommandGroup(group => group.setName('channel').setDescription('Csatornák')
-                .addSubcommand(sub => sub.setName('add').setDescription('Engedélyezés (Whitelist)').addChannelOption(o => o.setName('target').setDescription('Csatorna')))
+                .addSubcommand(sub => sub.setName('add').setDescription('Engedélyezés').addChannelOption(o => o.setName('target').setDescription('Csatorna')))
                 .addSubcommand(sub => sub.setName('remove').setDescription('Tiltás').addChannelOption(o => o.setName('target').setDescription('Csatorna')))
-                // ÚJ PARANCS: SETLOG
-                .addSubcommand(sub => sub.setName('setlog').setDescription('Log csatorna beállítása').addChannelOption(o => o.setName('target').setDescription('A log csatorna').setRequired(true))))
+                .addSubcommand(sub => sub.setName('setlog').setDescription('Log csatorna').addChannelOption(o => o.setName('target').setDescription('Csatorna').setRequired(true))))
     ].map(c => c.toJSON());
     const clientId = process.env.CLIENT_ID || client.user.id;
     await rest.put(Routes.applicationCommands(clientId), { body: commands });
