@@ -104,22 +104,25 @@ async function getFile(url, fileName) {
     } catch (e) { return null; }
 }
 
-// --- ÚJ "MINDENT BELE" KERESŐ ---
+// --- ÚJ "INTELLIGENS" KERESŐ ---
 async function findFixes(appid, gameName) {
     let foundFiles = [];
 
-    // 1. Ryuu Keresés (Több variáció tesztelése)
+    // 1. Ryuu Keresés - Minden variációt megnéz
     if (gameName) {
+        // Tiszta név (kettőspontok nélkül)
         const clean = gameName.replace(/[:™®]/g, ""); 
         
-        // Itt felsoroljuk, hogy milyen neveken szokott lenni fájl a szerveren.
-        // A bot mindegyiket megpróbálja letölteni (virtuálisan).
+        // ITT VAN A JAVÍTÁS:
+        // A sima ".zip"-et alapból Online Fix-nek nevezzük el, mert a Ryuu oldalon 
+        // az esetek 99%-ában a sima nevű fájl az "Online/Tested" verzió.
         const candidates = [
-            { suffix: '.zip', label: '📁 Alap Javítás (Fix)' },        // Sima név
-            { suffix: ' Bypass.zip', label: '🛡️ Bypass' },             // Külön Bypass fájl
-            { suffix: ' Online Fix.zip', label: '🌐 Online Fix' },     // Külön Online Fix fájl
-            { suffix: ' Fix.zip', label: '🔧 Fix' },                  // "Fix" végződés
-            { suffix: ' Online.zip', label: '🌐 Online' }              // "Online" végződés
+            { suffix: '.zip', label: '🌐 Online Fix / Alap' },         // Sima név -> Online Fix
+            { suffix: ' Bypass.zip', label: '🛡️ Bypass' },              // Bypass -> Bypass
+            { suffix: ' Online Fix.zip', label: '🌐 Online Fix' },      // Explicit Online Fix
+            { suffix: ' Fix.zip', label: '🔧 Fix' },                   // Sima Fix
+            { suffix: ' Online.zip', label: '🌐 Online' },              // Online
+            { suffix: ' Online Patch - Tested OK.zip', label: '✅ Tested Online' } // Régi Tested
         ];
 
         for (const candidate of candidates) {
@@ -127,25 +130,24 @@ async function findFixes(appid, gameName) {
             const url = `${FIX_SOURCES.ryuu_fixes}/${encodeURIComponent(fileName)}`;
             
             try {
-                // Megnézzük, létezik-e ez a verzió
+                // Csak lecsekkoljuk, hogy létezik-e (HEAD)
                 const check = await axios.head(url, { timeout: 1200 }).catch(() => null);
                 if (check && check.status === 200) {
                     foundFiles.push({ 
                         url: url, 
                         name: fileName, 
-                        type: candidate.label 
+                        type: candidate.label // Itt kapja meg a szép nevet
                     });
                 }
             } catch (e) { continue; }
         }
     }
 
-    // 2. Luatools Keresés (AppID alapján - Ez általában Online Fix)
+    // 2. Luatools Keresés (Biztonsági tartalék)
     const onlineUrl = `${FIX_SOURCES.online}${appid}.zip`;
     try {
         const checkOnline = await axios.head(onlineUrl, { timeout: 1500 }).catch(() => null);
         if (checkOnline && checkOnline.status === 200) {
-            // Csak akkor adjuk hozzá, ha még nincs meg (duplikáció elkerülése)
             if (!foundFiles.some(f => f.url === onlineUrl)) {
                 foundFiles.push({ 
                     url: onlineUrl, 
@@ -156,7 +158,7 @@ async function findFixes(appid, gameName) {
         }
     } catch(e) {}
     
-    return foundFiles; // Visszaadja az összes talált verziót
+    return foundFiles; // Visszaadja az összes talált fájlt
 }
 
 // --- 6. ESEMÉNYEK ---
@@ -244,7 +246,7 @@ client.on(Events.InteractionCreate, async interaction => {
             const gameData = steamRes.data[appId].data;
             console.log(`[KERESÉS] ${interaction.user.tag} -> ${gameData.name}`);
 
-            // --- KERESÉS INDÍTÁSA (Több fájlt is kereshet) ---
+            // --- KERESÉS INDÍTÁSA ---
             const foundFixes = await findFixes(appId, gameData.name);
             const zip = await fetchManifestZip(appId);
             
@@ -264,7 +266,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 statusText += `⚠️ **Manifest:** Nincs találat.\n`;
             }
 
-            // 2. TALÁLATOK LISTÁZÁSA (Ha van "1 Fix" vagy "2 Fixes")
+            // 2. MINDEN TALÁLT FÁJL (Online Fix + Bypass)
             if (foundFixes.length > 0) {
                 statusText += `\n**🛠️ Talált Javítások (${foundFixes.length} db):**\n`;
                 
@@ -273,6 +275,7 @@ client.on(Events.InteractionCreate, async interaction => {
                     
                     if (fileData?.attachment) {
                         attachments.push(fileData.attachment);
+                        // Itt használjuk a "szép" nevet (fix.type)
                         statusText += `✅ **${fix.type}:** Fájl csatolva\n`;
                     } else if (fileData?.tooLarge) {
                         statusText += `⚠️ **${fix.type}:** Túl nagy (${fileData.size} MB) -> [Letöltés](${fix.url})\n`;
@@ -301,7 +304,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 )
                 .setFooter({ text: "SteamTools Master" });
 
-            // 3. KÜLDÉS (FAIL-SAFE)
+            // 3. KÜLDÉS
             try {
                 await interaction.editReply({ embeds: [embed], files: attachments });
             } catch (sendError) {
@@ -309,6 +312,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 
                 let fallbackText = "";
                 if (zip) fallbackText += `🔗 **Manifest:** [LETÖLTÉS LINK](${zip.url})\n`;
+                // Listázzuk az összes linket
                 for (const fix of foundFixes) {
                     fallbackText += `🔗 **${fix.type}:** [LETÖLTÉS LINK](${fix.url})\n`;
                 }
@@ -323,7 +327,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 await interaction.editReply({ embeds: [fallbackEmbed], files: [] });
             }
 
-            // 4. LOG
+            // 4. LOGOLÁS
             if (config && config.logChannelId) {
                 try {
                     const logChannel = await client.channels.fetch(config.logChannelId);
