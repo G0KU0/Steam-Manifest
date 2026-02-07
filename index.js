@@ -38,10 +38,9 @@ const ConfigSchema = new mongoose.Schema({
 const ConfigModel = mongoose.model('Config', ConfigSchema);
 
 // --- 4. FORRÁSOK ---
-const FIX_SOURCES = {
-    online: "https://files.luatools.work/OnlineFix1/",
-    ryuu_base: "https://generator.ryuu.lol"
-};
+const RYUU_ALL_FIXES_URL = "https://generator.ryuu.lol/fixes"; // Itt van az ÖSSZES játék egy listában
+const RYUU_BASE = "https://generator.ryuu.lol";
+const LUATOOLS_URL = "https://files.luatools.work/OnlineFix1/";
 
 const MANIFEST_SOURCES = [
     { name: 'Morrenus', url: (id) => `https://manifest.morrenus.xyz/api/v1/manifest/${id}?api_key=${process.env.MORRENUS_API_KEY}` },
@@ -92,66 +91,83 @@ async function fetchManifestZip(id) {
 
 async function getFile(url, fileName) {
     try {
-        const res = await axios.get(url, { responseType: 'arraybuffer', timeout: 30000, headers: { 'User-Agent': 'Mozilla/5.0' } });
+        const encodedUrl = encodeURI(url);
+        const res = await axios.get(encodedUrl, { 
+            responseType: 'arraybuffer', 
+            timeout: 60000, 
+            maxContentLength: 30 * 1024 * 1024,
+            headers: { 'User-Agent': 'Mozilla/5.0' } 
+        });
         return { attachment: new AttachmentBuilder(Buffer.from(res.data), { name: fileName }) };
-    } catch (e) { return null; }
+    } catch (e) { 
+        if (e.response && e.response.status === 413) return { tooLarge: true };
+        return null; 
+    }
 }
 
-// --- KERESŐ FÜGGVÉNY ---
+// Név tisztító a pontosabb kereséshez (pl. kiszedi a ® jelet és a szóközöket)
+function cleanName(name) {
+    return name.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+// --- JAVÍTOTT KERESŐ (LISTA SZŰRÉSE) ---
 async function findFixes(appid, gameName) {
-    let foundFiles = []; // Itt gyűjtjük a fájlokat
+    let foundFiles = [];
+    const targetNameClean = cleanName(gameName); // Pl: "assassinscreedodyssey"
 
-    // 1. Ryuu HTML Scraping
-    if (gameName) {
-        const searchUrl = `${FIX_SOURCES.ryuu_base}/fixes/${encodeURIComponent(gameName)}`;
-        
-        try {
-            const response = await axios.get(searchUrl, {
-                headers: { 'User-Agent': 'Mozilla/5.0' },
-                validateStatus: status => status === 200
-            }).catch(() => null);
+    // 1. Ryuu HTML Lista letöltése és keresés benne
+    try {
+        // Letöltjük a teljes oldalt, ahol a lista van
+        const response = await axios.get(RYUU_ALL_FIXES_URL, {
+            headers: { 'User-Agent': 'Mozilla/5.0' }
+        });
 
-            if (response && response.data) {
-                const $ = cheerio.load(response.data);
-                
-                $('.fix-item').each((index, element) => {
+        if (response.data) {
+            const $ = cheerio.load(response.data);
+            
+            // Megkeressük az összes .fix-item elemet az oldalon
+            $('.fix-item').each((index, element) => {
+                const name = $(element).find('.fix-name').text().trim();
+                const fileNameClean = cleanName(name);
+
+                // Megnézzük, hogy a fájl neve tartalmazza-e a játék nevét
+                // Pl. "Assassin's Creed Odyssey 1.zip" tartalmazza "Assassin's Creed Odyssey"-t
+                if (name && fileNameClean.includes(targetNameClean)) {
+                    
                     const relativeLink = $(element).attr('href');
-                    const name = $(element).find('.fix-name').text().trim();
                     const sizeText = $(element).find('.fix-size').text().trim(); 
                     const badges = $(element).find('.fix-badge').map((i, el) => $(el).text().trim()).get().join(' | ');
-
-                    if (relativeLink && name) {
-                        const fullUrl = relativeLink.startsWith('http') ? relativeLink : `${FIX_SOURCES.ryuu_base}${relativeLink}`;
-                        
-                        let isTooBig = false;
-                        if (sizeText.includes('GB')) isTooBig = true;
-                        if (sizeText.includes('MB')) {
-                            const sizeNum = parseFloat(sizeText.replace(/[^0-9.]/g, ''));
-                            if (sizeNum > 24.5) isTooBig = true;
-                        }
-
-                        let type = "Fix";
-                        if (badges.toLowerCase().includes('bypass')) type = "🛡️ Bypass";
-                        else if (badges.toLowerCase().includes('online')) type = "🌐 Online Fix";
-
-                        foundFiles.push({
-                            url: fullUrl,
-                            name: name.endsWith('.zip') ? name : `${name}.zip`,
-                            type: type,
-                            badges: badges,
-                            sizeText: sizeText,
-                            isTooBig: isTooBig
-                        });
+                    
+                    const fullUrl = relativeLink.startsWith('http') ? relativeLink : `${RYUU_BASE}${relativeLink}`;
+                    
+                    let isTooBig = false;
+                    if (sizeText.includes('GB')) isTooBig = true;
+                    if (sizeText.includes('MB')) {
+                        const sizeNum = parseFloat(sizeText.replace(/[^0-9.]/g, ''));
+                        if (sizeNum > 24.5) isTooBig = true;
                     }
-                });
-            }
-        } catch (e) {
-            console.error("Ryuu scrape hiba:", e.message);
+
+                    let type = "Fix";
+                    if (badges.toLowerCase().includes('bypass')) type = "🛡️ Bypass";
+                    else if (badges.toLowerCase().includes('online')) type = "🌐 Online Fix";
+
+                    foundFiles.push({
+                        url: fullUrl,
+                        name: name.endsWith('.zip') ? name : `${name}.zip`,
+                        type: type,
+                        badges: badges,
+                        sizeText: sizeText,
+                        isTooBig: isTooBig
+                    });
+                }
+            });
         }
+    } catch (e) {
+        console.error("Hiba a Ryuu lista beolvasásakor:", e.message);
     }
 
-    // 2. Luatools Keresés (Backup)
-    const onlineUrl = `${FIX_SOURCES.online}${appid}.zip`;
+    // 2. Luatools Keresés (Biztonsági tartalék)
+    const onlineUrl = `${LUATOOLS_URL}${appid}.zip`;
     try {
         const checkOnline = await axios.head(onlineUrl, { timeout: 1500 }).catch(() => null);
         if (checkOnline && checkOnline.status === 200) {
@@ -254,11 +270,11 @@ client.on(Events.InteractionCreate, async interaction => {
             if (!steamRes.data[appId]?.success) return interaction.editReply("❌ Játék nem található a Steamen.");
 
             const gameData = steamRes.data[appId].data;
-            console.log(`[KERESÉS] ${interaction.user.tag} -> ${gameData.name}`);
+            const searchName = gameData.name;
+            console.log(`[KERESÉS] ${interaction.user.tag} -> ${searchName}`);
 
-            // --- VÁLTOZÓ JAVÍTÁSA: foundFiles ---
-            // Itt egységesítettem a nevet. A függvény eredménye 'foundFiles' néven lesz elérhető.
-            const foundFiles = await findFixes(appId, gameData.name); 
+            // ITT hívjuk meg az új keresőt
+            const foundFiles = await findFixes(appId, searchName); 
             const zip = await fetchManifestZip(appId);
             
             let attachments = [];
@@ -277,7 +293,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 statusText += `❌ **Manifest:** Nincs találat.\n`;
             }
 
-            // 2. JAVÍTÁSOK LISTÁZÁSA (foundFiles használata foundFixes helyett!)
+            // 2. JAVÍTÁSOK LISTÁZÁSA
             if (foundFiles.length > 0) {
                 statusText += `\n**🛠️ Talált Fájlok (${foundFiles.length} db):**\n`;
                 
@@ -290,17 +306,17 @@ client.on(Events.InteractionCreate, async interaction => {
                         continue;
                     }
 
-                    const fileData = await getFile(encodeURI(fix.url), fix.name);
+                    const fileData = await getFile(fix.url, fix.name);
                     
                     if (fileData?.attachment) {
                         attachments.push(fileData.attachment);
                         statusText += `✅ **${fix.type}:** ${fix.name} ${badges} ${sizeInfo}\n`;
                     } else {
-                        statusText += `🔗 **${fix.type}:** [Link](${encodeURI(fix.url)}) (Letöltési hiba) ${badges}\n`;
+                        statusText += `🔗 **${fix.type}:** [Letöltés](${encodeURI(fix.url)}) (Letöltési hiba/Túl nagy) ${badges}\n`;
                     }
                 }
             } else {
-                statusText += `❌ **Javítás:** Nem található fájl.\n`;
+                statusText += `❌ **Javítás:** Nem található fájl a listában.\n`;
             }
 
             // KVÓTA
@@ -324,13 +340,12 @@ client.on(Events.InteractionCreate, async interaction => {
             try {
                 await interaction.editReply({ embeds: [embed], files: attachments });
             } catch (sendError) {
-                // FALLBACK (Itt volt a hiba, javítva foundFiles-ra!)
+                // FALLBACK
                 console.log("Küldési hiba (túl nagy csomag), váltás Link módra.");
                 
                 let fallbackText = "";
                 if (zip) fallbackText += `🔗 **Manifest:** [LETÖLTÉS](${zip.url})\n`;
                 
-                // JAVÍTVA: foundFiles használata
                 for (const fix of foundFiles) {
                     fallbackText += `🔗 **${fix.type}:** [LETÖLTÉS](${encodeURI(fix.url)}) (${fix.sizeText || '?'})\n`;
                 }
@@ -345,7 +360,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 await interaction.editReply({ embeds: [fallbackEmbed], files: [] });
             }
 
-            // 4. LOG (Itt is javítva foundFiles-ra!)
+            // 4. LOG
             if (config && config.logChannelId) {
                 try {
                     const logChannel = await client.channels.fetch(config.logChannelId);
