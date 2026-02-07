@@ -37,16 +37,16 @@ const ConfigSchema = new mongoose.Schema({
 const ConfigModel = mongoose.model('Config', ConfigSchema);
 
 // --- 4. FORRÁSOK ---
-const API_URLS = {
-    ryuu_list: "https://generator.ryuu.lol/api/fixes", // Innen szedi a listát
-    ryuu_download: "https://generator.ryuu.lol/fixes/",
-    online_fix: "https://files.luatools.work/OnlineFix1/"
+const FIX_SOURCES = {
+    online: "https://files.luatools.work/OnlineFix1/",
+    ryuu_fixes: "https://generator.ryuu.lol/fixes"
 };
 
 const MANIFEST_SOURCES = [
     { name: 'Morrenus', url: (id) => `https://manifest.morrenus.xyz/api/v1/manifest/${id}?api_key=${process.env.MORRENUS_API_KEY}` },
     { name: 'Ryuu', url: (id) => `http://167.235.229.108/${id}` },
     { name: 'Sushi', url: (id) => `https://raw.githubusercontent.com/sushi-dev55-alt/sushitools-games-repo-alt/refs/heads/main/${id}.zip` },
+    { name: 'TwentyTwo', url: (id) => `http://masss.pythonanywhere.com/storage?auth=IEOIJE54esfsipoE56GE4&appid=${id}` },
     { name: 'ManifestHub', url: (id) => `https://codeload.github.com/SteamAutoCracks/ManifestHub/zip/refs/heads/${id}` }
 ];
 
@@ -104,55 +104,46 @@ async function getFile(url, fileName) {
     } catch (e) { return null; }
 }
 
-// --- ÚJ: API ALAPÚ KERESŐ (Ez olvassa az oldal "agyát") ---
+// --- JAVÍTOTT KERESŐ (MEGTARTJA A SZÓKÖZÖKET!) ---
 async function findFixes(appid, gameName) {
     let foundFiles = [];
 
-    // 1. Ryuu API lekérdezése (A teljes lista)
-    try {
-        const response = await axios.get(API_URLS.ryuu_list, { timeout: 3000 });
-        const allFixes = response.data; // Ez a JSON lista az oldalról
+    // 1. Ryuu Keresés
+    if (gameName) {
+        // CSAK a tiltott karaktereket szedjük ki, a szóköz marad!
+        // Pl. "7 Days to Die" -> "7 Days to Die" (NEM "7DaystoDie")
+        const cleanName = gameName.replace(/[<>:"/\\|?*]/g, "").trim(); 
+        
+        // Variációk, amiket keresünk
+        const variations = [
+            { suffix: '.zip', label: '🌐 Online Fix / Standard' },      // "Jatek Nev.zip"
+            { suffix: ' Fix.zip', label: '🔧 Fix' },                   // "Jatek Nev Fix.zip"
+            { suffix: ' Online.zip', label: '🌐 Online' },              // "Jatek Nev Online.zip"
+            { suffix: ' Bypass.zip', label: '🛡️ Bypass' },              // "Jatek Nev Bypass.zip"
+            { suffix: ' Online Fix.zip', label: '🌐 Online Fix' }       // "Jatek Nev Online Fix.zip"
+        ];
 
-        // Szűrés a játék nevére
-        // (Azonosítjuk a játékot a neve alapján)
-        if (gameName && Array.isArray(allFixes)) {
-            const searchName = gameName.toLowerCase().replace(/[^a-z0-9]/g, ""); // Tisztított keresőnév
-
-            // Végigmegyünk a listán
-            allFixes.forEach(item => {
-                // Az elem neve a listában (pl. "7 Days to Die")
-                const itemNameClean = item.name.toLowerCase().replace(/[^a-z0-9]/g, "");
-
-                // Ha egyezik a név, vagy nagyon hasonlít
-                if (itemNameClean.includes(searchName) || searchName.includes(itemNameClean)) {
-                    // MEGTALÁLTUK!
-                    // Az index.html alapján ezek az adatok vannak benne:
-                    // item.name = Játék neve
-                    // item.file = Fájlnév (pl. "7 Days to Die.zip")
-                    // item.type = Típus (pl. "Online", "Bypass", "Fix")
-                    // item.status = Állapot (pl. "Tested", "Unstable")
-
-                    const downloadUrl = `${API_URLS.ryuu_download}${encodeURIComponent(item.file)}`;
-                    
-                    // Szép címke készítése (pl. "Tested Online" vagy "Unstable Bypass")
-                    let label = "🔧 Fix";
-                    if (item.type) label = item.type; // pl. "Online"
-                    if (item.status) label = `${item.status} ${label}`; // pl. "Tested Online"
-
-                    foundFiles.push({
-                        url: downloadUrl,
-                        name: item.file,
-                        type: label.toUpperCase() // Csupa nagybetűvel, ahogy kérted
+        for (const v of variations) {
+            // Itt a trükk: a fájlnévben marad a szóköz, de az URL-ben kódoljuk (%20)
+            const fileName = `${cleanName}${v.suffix}`;
+            const url = `${FIX_SOURCES.ryuu_fixes}/${encodeURIComponent(fileName)}`;
+            
+            try {
+                // Megnézzük, létezik-e (HEAD kérés)
+                const check = await axios.head(url, { timeout: 1500 }).catch(() => null);
+                if (check && check.status === 200) {
+                    foundFiles.push({ 
+                        url: url, 
+                        name: fileName, 
+                        type: v.label 
                     });
                 }
-            });
+            } catch (e) { continue; }
         }
-    } catch (e) {
-        console.error("Ryuu API hiba:", e.message);
     }
 
-    // 2. Luatools (Online Fix) hozzáadása tartaléknak
-    const onlineUrl = `${API_URLS.online_fix}${appid}.zip`;
+    // 2. Luatools Keresés (Biztonsági tartalék)
+    const onlineUrl = `${FIX_SOURCES.online}${appid}.zip`;
     try {
         const checkOnline = await axios.head(onlineUrl, { timeout: 1500 }).catch(() => null);
         if (checkOnline && checkOnline.status === 200) {
@@ -160,7 +151,7 @@ async function findFixes(appid, gameName) {
                 foundFiles.push({ 
                     url: onlineUrl, 
                     name: `OnlineFix_${appid}.zip`, 
-                    type: '🌐 LUATOOLS ONLINE' 
+                    type: '🌐 Luatools Fix' 
                 });
             }
         }
@@ -254,7 +245,7 @@ client.on(Events.InteractionCreate, async interaction => {
             const gameData = steamRes.data[appId].data;
             console.log(`[KERESÉS] ${interaction.user.tag} -> ${gameData.name}`);
 
-            // --- KERESÉS INDÍTÁSA (API ALAPÚ) ---
+            // KERESÉS INDÍTÁSA
             const foundFixes = await findFixes(appId, gameData.name);
             const zip = await fetchManifestZip(appId);
             
@@ -274,7 +265,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 statusText += `⚠️ **Manifest:** Nincs találat.\n`;
             }
 
-            // 2. TALÁLATOK LISTÁZÁSA (A weboldal típusai alapján!)
+            // 2. JAVÍTÁSOK LISTÁZÁSA
             if (foundFixes.length > 0) {
                 statusText += `\n**🛠️ Talált Fájlok (${foundFixes.length} db):**\n`;
                 
@@ -283,7 +274,7 @@ client.on(Events.InteractionCreate, async interaction => {
                     
                     if (fileData?.attachment) {
                         attachments.push(fileData.attachment);
-                        // Itt írja ki pl. "TESTED ONLINE" vagy "BYPASS"
+                        // Itt írja ki: "Online Fix" vagy "Bypass"
                         statusText += `✅ **${fix.type}:** Fájl csatolva\n`;
                     } else if (fileData?.tooLarge) {
                         statusText += `⚠️ **${fix.type}:** Túl nagy (${fileData.size} MB) -> [Letöltés](${fix.url})\n`;
@@ -292,7 +283,7 @@ client.on(Events.InteractionCreate, async interaction => {
                     }
                 }
             } else {
-                statusText += `❌ **Javítás:** Nem található a szerver listájában.\n`;
+                statusText += `❌ **Javítás:** Nem található fájl a szerveren.\n`;
             }
 
             // KVÓTA
